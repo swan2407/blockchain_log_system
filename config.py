@@ -8,25 +8,34 @@ DATA_DIR = PROJECT_ROOT / "data"
 
 HOST = "127.0.0.1"
 
-# These ports are reserved for the socket-based components that will be added
-# in the next phase of the project.
 BLOCK_PRODUCER_HOST = HOST
 BLOCK_PRODUCER_PORT = 5000
 
-VALIDATOR_HOST = HOST
-VALIDATOR_PORTS = {
-    "A": 6001,
-    "B": 6002,
-    "C": 6003,
+VALIDATORS = {
+    "A": {"host": HOST, "port": 6001},
+    "B": {"host": HOST, "port": 6002},
+    "C": {"host": HOST, "port": 6003},
 }
 
-VALIDATOR_IDS = tuple(VALIDATOR_PORTS.keys())
+SECRET_TOKEN = "my_secret_token"
+GENESIS_PREVIOUS_HASH = "0" * 64
+
+VALIDATOR_IDS = tuple(VALIDATORS.keys())
 VALIDATOR_CHAIN_FILES = {
     validator_id: DATA_DIR / f"validator_{validator_id}_chain.json"
     for validator_id in VALIDATOR_IDS
 }
 
-GENESIS_PREVIOUS_HASH = "0" * 64
+# Backward-compatible aliases used by the TCP scripts.
+AUTH_TOKEN = SECRET_TOKEN
+VALIDATOR_HOST = HOST
+VALIDATOR_PORTS = {
+    validator_id: validator["port"]
+    for validator_id, validator in VALIDATORS.items()
+}
+
+SOCKET_BACKLOG = 5
+SOCKET_TIMEOUT_SECONDS = 5.0
 
 
 def ensure_data_dir() -> Path:

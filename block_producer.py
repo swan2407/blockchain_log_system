@@ -1,4 +1,4 @@
-"""TCP block producer that receives logs and broadcasts blocks to validators."""
+"""TCP block producer that turns LOG messages into replicated blocks."""
 
 from __future__ import annotations
 
@@ -6,24 +6,24 @@ import json
 import socket
 from typing import Any
 
-from blockchain import create_block
+from blockchain import create_block, get_latest_hash
 from config import (
-    AUTH_TOKEN,
     BLOCK_PRODUCER_HOST,
     BLOCK_PRODUCER_PORT,
-    GENESIS_PREVIOUS_HASH,
+    SECRET_TOKEN,
     SOCKET_BACKLOG,
     SOCKET_TIMEOUT_SECONDS,
-    VALIDATOR_HOST,
     VALIDATOR_IDS,
-    VALIDATOR_PORTS,
+    VALIDATORS,
 )
+from crypto_utils import verify_plain_token
 
 
 producer_chain: list[dict[str, Any]] = []
 
 
 def receive_json(connection: socket.socket) -> dict[str, Any]:
+    """Read one newline-delimited JSON message from a TCP connection."""
     chunks: list[bytes] = []
     while True:
         chunk = connection.recv(4096)
@@ -40,17 +40,13 @@ def receive_json(connection: socket.socket) -> dict[str, Any]:
 
 
 def send_json(connection: socket.socket, message: dict[str, Any]) -> None:
-    data = json.dumps(message, separators=(",", ":")).encode("utf-8") + b"\n"
-    connection.sendall(data)
+    """Send one newline-delimited JSON message."""
+    encoded = json.dumps(message, separators=(",", ":")).encode("utf-8") + b"\n"
+    connection.sendall(encoded)
 
 
-def build_block(log_message: dict[str, Any]) -> dict[str, Any]:
-    """Convert a LOG message into the next hash-chained block."""
-    previous_hash = (
-        producer_chain[-1]["current_hash"]
-        if producer_chain
-        else GENESIS_PREVIOUS_HASH
-    )
+def create_block_from_log(log_message: dict[str, Any]) -> dict[str, Any]:
+    """Create and remember the next block from a valid LOG message."""
     log_data = {
         "node_id": log_message["node_id"],
         "message": log_message["message"],
@@ -58,55 +54,63 @@ def build_block(log_message: dict[str, Any]) -> dict[str, Any]:
     block = create_block(
         index=len(producer_chain),
         log_data=log_data,
-        previous_hash=previous_hash,
+        previous_hash=get_latest_hash(producer_chain),
     )
     producer_chain.append(block)
     return block
 
 
-def send_block_to_validator(
-    validator_id: str,
-    block: dict[str, Any],
-) -> tuple[bool, str]:
-    """Send a block to one validator and return whether it was accepted."""
-    port = VALIDATOR_PORTS[validator_id]
+def send_block_to_validator(validator_id: str, block: dict[str, Any]) -> bool:
+    """Send a block to one validator without affecting other validators."""
+    validator = VALIDATORS[validator_id]
     outbound_message = {
         "type": "BLOCK",
         "block": block,
-        "token": AUTH_TOKEN,
+        "token": SECRET_TOKEN,
     }
 
     try:
         with socket.create_connection(
-            (VALIDATOR_HOST, port),
+            (validator["host"], validator["port"]),
             timeout=SOCKET_TIMEOUT_SECONDS,
         ) as client_socket:
             send_json(client_socket, outbound_message)
             response = receive_json(client_socket)
     except OSError as exc:
-        return False, f"connection failed: {exc}"
+        print(
+            f"[Producer] Failed to send Block #{block['index']} "
+            f"to Validator {validator_id}: {exc}"
+        )
+        return False
 
     if response.get("status") == "OK":
-        return True, response.get("reason", "accepted")
-    return False, response.get("reason", "rejected")
+        print(f"[Producer] Sent Block #{block['index']} to Validator {validator_id}")
+        return True
+
+    reason = response.get("reason", "validator rejected block")
+    print(
+        f"[Producer] Failed to send Block #{block['index']} "
+        f"to Validator {validator_id}: {reason}"
+    )
+    return False
 
 
 def broadcast_block(block: dict[str, Any]) -> None:
-    """Send a block to every validator, continuing if one is unavailable."""
+    """Broadcast a block to validators A, B, and C."""
     for validator_id in VALIDATOR_IDS:
-        accepted, reason = send_block_to_validator(validator_id, block)
-        status = "sent" if accepted else "failed"
-        print(f"Validator {validator_id}: {status} ({reason})")
+        send_block_to_validator(validator_id, block)
 
 
 def handle_log_connection(
     connection: socket.socket,
     address: tuple[str, int],
 ) -> None:
-    """Receive one LOG message, create one block, and broadcast it."""
+    """Handle one LOG message from a log node."""
     try:
         message = receive_json(connection)
-        if message.get("token") != AUTH_TOKEN:
+
+        if not verify_plain_token(message.get("token", "")):
+            print(f"[Producer] Invalid token from {address[0]}:{address[1]}")
             send_json(connection, {"status": "ERROR", "reason": "invalid token"})
             return
 
@@ -118,12 +122,11 @@ def handle_log_connection(
             send_json(connection, {"status": "ERROR", "reason": "missing log fields"})
             return
 
-        block = build_block(message)
-        print(
-            f"LOG from {address[0]}:{address[1]} -> block {block['index']} "
-            f"{block['current_hash']}"
-        )
+        print(f"[Producer] Received log from {message['node_id']}")
+        block = create_block_from_log(message)
+        print(f"[Producer] Created Block #{block['index']}")
         broadcast_block(block)
+
         send_json(
             connection,
             {
@@ -133,8 +136,11 @@ def handle_log_connection(
             },
         )
     except Exception as exc:
-        send_json(connection, {"status": "ERROR", "reason": str(exc)})
-        print(f"{address[0]}:{address[1]} -> ERROR: {exc}")
+        print(f"[Producer] Error while handling {address[0]}:{address[1]}: {exc}")
+        try:
+            send_json(connection, {"status": "ERROR", "reason": str(exc)})
+        except OSError:
+            pass
 
 
 def run_block_producer() -> None:
@@ -143,10 +149,7 @@ def run_block_producer() -> None:
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server_socket.bind((BLOCK_PRODUCER_HOST, BLOCK_PRODUCER_PORT))
         server_socket.listen(SOCKET_BACKLOG)
-        print(
-            "Block producer listening on "
-            f"{BLOCK_PRODUCER_HOST}:{BLOCK_PRODUCER_PORT}"
-        )
+        print(f"[Producer] Listening on {BLOCK_PRODUCER_HOST}:{BLOCK_PRODUCER_PORT}")
 
         while True:
             connection, address = server_socket.accept()

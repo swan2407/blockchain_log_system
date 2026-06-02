@@ -1,4 +1,4 @@
-"""Log generation node that sends LOG messages to the block producer."""
+"""Log generation node that sends JSON LOG messages to the block producer."""
 
 from __future__ import annotations
 
@@ -9,14 +9,23 @@ import time
 from typing import Any
 
 from config import (
-    AUTH_TOKEN,
     BLOCK_PRODUCER_HOST,
     BLOCK_PRODUCER_PORT,
+    SECRET_TOKEN,
     SOCKET_TIMEOUT_SECONDS,
 )
 
 
+LOG_MESSAGES = [
+    "STATUS=NORMAL ACTION=BOOT",
+    "STATUS=NORMAL ACTION=HEARTBEAT",
+    "STATUS=WARNING ACTION=HIGH_CPU",
+    "STATUS=NORMAL ACTION=CHECK",
+]
+
+
 def receive_json(connection: socket.socket) -> dict[str, Any]:
+    """Read one newline-delimited JSON response."""
     chunks: list[bytes] = []
     while True:
         chunk = connection.recv(4096)
@@ -33,34 +42,43 @@ def receive_json(connection: socket.socket) -> dict[str, Any]:
 
 
 def send_json(connection: socket.socket, message: dict[str, Any]) -> None:
-    data = json.dumps(message, separators=(",", ":")).encode("utf-8") + b"\n"
-    connection.sendall(data)
+    """Send one newline-delimited JSON message."""
+    encoded = json.dumps(message, separators=(",", ":")).encode("utf-8") + b"\n"
+    connection.sendall(encoded)
 
 
-def send_log(node_id: str, message: str) -> dict[str, Any]:
+def send_log(node_id: str, log_message: str) -> dict[str, Any]:
     """Send one LOG message to the block producer."""
-    log_message = {
+    message = {
         "type": "LOG",
         "node_id": node_id,
-        "message": message,
-        "token": AUTH_TOKEN,
+        "message": log_message,
+        "token": SECRET_TOKEN,
     }
+
     with socket.create_connection(
         (BLOCK_PRODUCER_HOST, BLOCK_PRODUCER_PORT),
         timeout=SOCKET_TIMEOUT_SECONDS,
     ) as client_socket:
-        send_json(client_socket, log_message)
+        send_json(client_socket, message)
         return receive_json(client_socket)
 
 
 def run_log_node(node_id: str, count: int, interval: float) -> None:
+    """Send a sequence of log messages to the block producer."""
     for sequence in range(1, count + 1):
-        message = f"STATUS=NORMAL ACTION=BOOT SEQ={sequence}"
+        log_message = LOG_MESSAGES[(sequence - 1) % len(LOG_MESSAGES)]
         try:
-            response = send_log(node_id, message)
-            print(f"Sent log {sequence}/{count}: {response}")
+            response = send_log(node_id, log_message)
+            if response.get("status") == "OK":
+                print(f"[LogNode {node_id}] Sent log {sequence}/{count}")
+            else:
+                print(
+                    f"[LogNode {node_id}] Log {sequence}/{count} rejected: "
+                    f"{response.get('reason')}"
+                )
         except OSError as exc:
-            print(f"Failed to send log {sequence}/{count}: {exc}")
+            print(f"[LogNode {node_id}] Failed to send log {sequence}/{count}: {exc}")
 
         if sequence < count:
             time.sleep(interval)

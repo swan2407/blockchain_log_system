@@ -9,12 +9,12 @@ DATA_DIR = PROJECT_ROOT / "data"
 HOST = "127.0.0.1"
 
 BLOCK_PRODUCER_HOST = HOST
-BLOCK_PRODUCER_PORT = 5000
+BLOCK_PRODUCER_PORT = 9000
 
 VALIDATORS = {
-    "A": {"host": HOST, "port": 6001},
-    "B": {"host": HOST, "port": 6002},
-    "C": {"host": HOST, "port": 6003},
+    "A": {"host": HOST, "port": 9101},
+    "B": {"host": HOST, "port": 9102},
+    "C": {"host": HOST, "port": 9103},
 }
 
 SECRET_TOKEN = "my_secret_token"

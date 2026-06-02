@@ -2,29 +2,24 @@
 
 This project implements a Python TCP socket based distributed log integrity
 verification system. Log messages are converted into SHA-256 hash-chained
-blocks, replicated to independent validator nodes, and later checked for
-tampering or divergence.
+blocks, replicated to independent validator nodes, and checked for tampering or
+state divergence.
 
-This is not intended to be a full blockchain with mining, consensus, or
-cryptocurrency behavior. It is a distributed log integrity verification system
-that uses a hash chain as the tamper-evident data structure.
+This is not a full blockchain with mining, consensus, or cryptocurrency
+behavior. It is a SHA-256 hash-chain based distributed log integrity
+verification system.
 
 ## Architecture Summary
 
-Current and planned components:
-
-- `log_node.py`: Python log sender that generates JSON `LOG` messages.
-- `block_producer.py`: TCP server that receives logs and creates hash-chained
-  blocks.
-- `validator_node.py`: TCP server for validator A, B, or C. Each validator
-  stores an independent JSON chain file.
-- `check_validators.py`: verifies each validator chain, compares block counts,
-  and compares latest hashes.
-- `tamper.py`: placeholder for tampering experiments.
-- `run_experiment.py`: placeholder for automated performance and recovery
-  experiments.
-- `reset_data.py`: resets local validator chain data.
-- `c_client/`: placeholder for a future C-based log sender.
+- `log_node.py` sends JSON `LOG` messages to the block producer.
+- `block_producer.py` receives logs, creates hash-chained blocks, and sends each
+  block to validators A, B, and C.
+- `validator_node.py` runs as an independent TCP server for each validator.
+- `check_validators.py` verifies validator chain integrity and compares their
+  latest replicated state.
+- `reset_data.py` resets validator chain files.
+- `tamper.py` and `run_experiment.py` are placeholders for later experiments.
+- `c_client/` is reserved for a future C-based external log sender.
 
 Validator storage files:
 
@@ -34,27 +29,20 @@ Validator storage files:
 
 ## Why Python Is Used
 
-Python is the main implementation language because it lets the project quickly
-build and verify distributed system behavior:
+Python is used to quickly build and verify the distributed system behavior:
 
-- TCP server/client control flow;
-- block creation and SHA-256 hash verification;
+- TCP server and client control flow;
+- SHA-256 block creation and verification;
 - validator replication;
 - integrity checking and tamper detection;
-- later failure recovery and synchronization logic;
+- later failure recovery and synchronization;
 - experiment automation and result collection.
-
-The goal is to keep the distributed systems logic readable, testable, and easy
-to extend for a university project.
 
 ## Why C Will Be Added Later
 
-C will be added later as a lightweight external log sender that simulates a
-field-side device or embedded log generation node.
-
-This language separation is intentional. The Python services define and enforce
-the protocol, while the future C client will prove that log ingestion is based
-on TCP and JSON message interoperability across runtime environments, not only
+C will be added as a lightweight field-side log generation node. This language
+separation is intentional: it shows that the system is based on a TCP/JSON
+protocol and can interoperate across runtime environments, not just
 Python-to-Python communication.
 
 ## Block Format
@@ -81,59 +69,102 @@ The block hash is calculated only from:
 - `log_data`
 - `previous_hash`
 
-`current_hash` is never included when calculating or verifying the block hash.
+`current_hash` is never included when calculating or verifying a block hash.
 
-## Current Execution Instructions
+## Communication Flow
 
-Reset validator data:
+Reset validator data first:
 
 ```bash
 python reset_data.py
 ```
 
-Compile the current core modules:
+Terminal 1:
+
+```bash
+python validator_node.py A
+```
+
+Terminal 2:
+
+```bash
+python validator_node.py B
+```
+
+Terminal 3:
+
+```bash
+python validator_node.py C
+```
+
+Terminal 4:
+
+```bash
+python block_producer.py
+```
+
+Terminal 5:
+
+```bash
+python log_node.py NODE-01 --count 5 --interval 0.5
+```
+
+Then verify:
+
+```bash
+python check_validators.py
+```
+
+Expected result:
+
+- validator A, B, and C should all have valid chains;
+- their block counts should match;
+- their latest hashes should match;
+- `check_validators.py` should print:
+
+```text
+Result: All validators are synchronized.
+```
+
+## Current Ports
+
+The current default ports are defined in `config.py`:
+
+- block producer: `127.0.0.1:9000`
+- validator A: `127.0.0.1:9101`
+- validator B: `127.0.0.1:9102`
+- validator C: `127.0.0.1:9103`
+
+## Compile Checks
+
+Compile the communication scripts:
+
+```bash
+python -m py_compile validator_node.py block_producer.py log_node.py check_validators.py
+```
+
+Compile the core modules:
 
 ```bash
 python -m py_compile config.py crypto_utils.py blockchain.py reset_data.py
 ```
 
-Run the current Python TCP flow:
-
-```bash
-python validator_node.py A
-python validator_node.py B
-python validator_node.py C
-python block_producer.py
-python log_node.py NODE-01 --count 5 --interval 0.5
-python check_validators.py
-```
-
-Use separate terminals for each long-running validator and for the block
-producer.
-
-Expected verification result:
-
-- validator A, B, and C chains are valid;
-- block counts match;
-- latest hashes match;
-- `check_validators.py` reports that all validators are synchronized.
-
 ## Current Project Structure
 
 ```text
 blockchain_log_system/
-├── config.py
-├── crypto_utils.py
-├── blockchain.py
-├── log_node.py
-├── block_producer.py
-├── validator_node.py
-├── check_validators.py
-├── tamper.py
-├── run_experiment.py
-├── reset_data.py
-├── README.md
-├── data/
-└── c_client/
-    └── README.md
+|-- config.py
+|-- crypto_utils.py
+|-- blockchain.py
+|-- log_node.py
+|-- block_producer.py
+|-- validator_node.py
+|-- check_validators.py
+|-- tamper.py
+|-- run_experiment.py
+|-- reset_data.py
+|-- README.md
+|-- data/
+`-- c_client/
+    `-- README.md
 ```

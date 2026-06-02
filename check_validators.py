@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from blockchain import get_latest_hash, get_latest_index, load_chain, verify_chain
+from blockchain import (
+    get_latest_hash,
+    get_latest_index,
+    load_chain,
+    verify_chain_detailed,
+)
 from config import VALIDATOR_CHAIN_FILES, VALIDATOR_IDS, ensure_data_dir
 
 
@@ -12,7 +17,7 @@ def print_validator_status(
     validator_id: str,
     chain: list[dict[str, Any]],
     is_valid: bool,
-    errors: list[str],
+    errors: list[dict[str, Any]],
 ) -> None:
     """Print chain validity and latest state for one validator."""
     print(f"Validator {validator_id}:")
@@ -21,7 +26,17 @@ def print_validator_status(
     print(f"  Latest index: {get_latest_index(chain)}")
     print(f"  Latest hash: {get_latest_hash(chain)}")
     for error in errors:
-        print(f"  Error: {error}")
+        block_index = error["block_index"]
+        index_text = (
+            "unknown block index"
+            if block_index is None
+            else f"block index {block_index}"
+        )
+        print(
+            f"  Error: Validator {validator_id}, {index_text}, "
+            f"position {error['position']}: {error['reason']}. "
+            f"{error['message']}"
+        )
 
 
 def explain_difference(
@@ -61,7 +76,7 @@ def check_validators() -> bool:
     print("Validator chain status:")
     for validator_id in VALIDATOR_IDS:
         chain = load_chain(VALIDATOR_CHAIN_FILES[validator_id])
-        is_valid, errors = verify_chain(chain)
+        is_valid, errors = verify_chain_detailed(chain)
 
         chains[validator_id] = chain
         validities[validator_id] = is_valid

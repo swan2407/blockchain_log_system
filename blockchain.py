@@ -97,25 +97,44 @@ def get_latest_index(chain: list[dict[str, Any]]) -> int:
     return chain[-1]["index"] if chain else -1
 
 
-def verify_block(
+def verify_block_detailed(
     block: dict[str, Any],
     previous_block: dict[str, Any] | None,
-) -> tuple[bool, list[str]]:
+) -> tuple[bool, list[dict[str, Any]]]:
     """Verify one block against its previous block."""
-    errors: list[str] = []
+    errors: list[dict[str, Any]] = []
 
     if not isinstance(block, dict):
-        return False, ["Block is not an object."]
+        return False, [
+            {
+                "block_index": None,
+                "reason": "block format error",
+                "message": "Block is not an object.",
+            }
+        ]
 
     missing_fields = REQUIRED_BLOCK_FIELDS.difference(block)
     if missing_fields:
         field_list = ", ".join(sorted(missing_fields))
-        return False, [f"Block is missing: {field_list}."]
+        return False, [
+            {
+                "block_index": block.get("index"),
+                "reason": "block format error",
+                "message": f"Block is missing: {field_list}.",
+            }
+        ]
 
     expected_index = 0 if previous_block is None else previous_block["index"] + 1
     if block["index"] != expected_index:
         errors.append(
-            f"Block has index {block['index']}; expected {expected_index}."
+            {
+                "block_index": block["index"],
+                "reason": "index mismatch",
+                "message": (
+                    f"Block has index {block['index']}; "
+                    f"expected {expected_index}."
+                ),
+            }
         )
 
     expected_previous_hash = (
@@ -125,34 +144,71 @@ def verify_block(
     )
     if block["previous_hash"] != expected_previous_hash:
         errors.append(
-            f"Block {block['index']} has previous_hash "
-            f"{block['previous_hash']}; expected {expected_previous_hash}."
+            {
+                "block_index": block["index"],
+                "reason": "previous_hash mismatch",
+                "message": (
+                    f"Block previous_hash is {block['previous_hash']}; "
+                    f"expected {expected_previous_hash}."
+                ),
+            }
         )
 
     recalculated_hash = calculate_block_hash(block)
     if block["current_hash"] != recalculated_hash:
         errors.append(
-            f"Block {block['index']} current_hash does not match the "
-            "recalculated hash. The block data may have been tampered with."
+            {
+                "block_index": block["index"],
+                "reason": "hash mismatch",
+                "message": (
+                    "Block current_hash does not match the recalculated hash. "
+                    "The block data may have been tampered with."
+                ),
+            }
         )
 
     return len(errors) == 0, errors
 
 
-def verify_chain(chain: list[dict[str, Any]]) -> tuple[bool, list[str]]:
+def verify_block(
+    block: dict[str, Any],
+    previous_block: dict[str, Any] | None,
+) -> tuple[bool, list[str]]:
+    """Verify one block and return human-readable error messages."""
+    is_valid, details = verify_block_detailed(block, previous_block)
+    return is_valid, [detail["message"] for detail in details]
+
+
+def verify_chain_detailed(
+    chain: list[dict[str, Any]],
+) -> tuple[bool, list[dict[str, Any]]]:
     """Verify block hashes, links, indexes, and tampering evidence."""
-    errors: list[str] = []
+    errors: list[dict[str, Any]] = []
 
     for position, block in enumerate(chain):
         previous_block = None if position == 0 else chain[position - 1]
-        is_valid, block_errors = verify_block(block, previous_block)
+        is_valid, block_errors = verify_block_detailed(block, previous_block)
         if not is_valid:
-            errors.extend(
-                f"Block at position {position}: {error}"
-                for error in block_errors
-            )
+            for error in block_errors:
+                errors.append({"position": position, **error})
 
     return len(errors) == 0, errors
+
+
+def verify_chain(chain: list[dict[str, Any]]) -> tuple[bool, list[str]]:
+    """Verify a chain and return human-readable error messages."""
+    is_valid, details = verify_chain_detailed(chain)
+    errors = []
+    for detail in details:
+        block_index = detail["block_index"]
+        index_text = (
+            "unknown index" if block_index is None else f"index {block_index}"
+        )
+        errors.append(
+            f"Block at position {detail['position']} ({index_text}): "
+            f"{detail['reason']}: {detail['message']}"
+        )
+    return is_valid, errors
 
 
 def verify_chain_file(chain_file: str | Path) -> tuple[bool, list[str]]:

@@ -18,7 +18,9 @@ verification system.
 - `check_validators.py` verifies validator chain integrity and compares their
   latest replicated state.
 - `reset_data.py` resets validator chain files.
-- `tamper.py` and `run_experiment.py` are placeholders for later experiments.
+- `tamper.py` intentionally modifies one validator chain file for tamper
+  detection experiments.
+- `run_experiment.py` is a placeholder for later experiment automation.
 - `c_client/` is reserved for a future C-based external log sender.
 
 Validator storage files:
@@ -126,6 +128,54 @@ Expected result:
 Result: All validators are synchronized.
 ```
 
+## Tamper Detection Experiment
+
+After generating and verifying a normal replicated chain, intentionally tamper
+with one validator file:
+
+```bash
+python tamper.py B 3 log
+```
+
+Then verify again:
+
+```bash
+python check_validators.py
+```
+
+Expected result:
+
+- validator B should report an invalid chain or a different replicated state;
+- the detailed error should identify validator B and the affected block index
+  when available;
+- `check_validators.py` should print:
+
+```text
+Result: Validators are not synchronized.
+```
+
+Supported tamper commands:
+
+```bash
+python tamper.py B 3 log
+python tamper.py B 3 previous_hash
+python tamper.py B 3 current_hash
+python tamper.py B 3 delete
+```
+
+Tamper modes:
+
+- `log` changes the selected block's `log_data.message` field, or replaces
+  `log_data` when it is not an object.
+- `previous_hash` replaces the selected block's `previous_hash` with an invalid
+  value.
+- `current_hash` replaces the selected block's `current_hash` with an invalid
+  value.
+- `delete` removes the selected block from the chain.
+
+`tamper.py` does not recalculate hashes. It simulates an attacker modifying
+stored data without repairing the complete hash chain.
+
 ## Current Ports
 
 The current default ports are defined in `config.py`:
@@ -140,7 +190,7 @@ The current default ports are defined in `config.py`:
 Compile the communication scripts:
 
 ```bash
-python -m py_compile validator_node.py block_producer.py log_node.py check_validators.py
+python -m py_compile validator_node.py block_producer.py log_node.py check_validators.py tamper.py
 ```
 
 Compile the core modules:

@@ -8,11 +8,13 @@ import socket
 from typing import Any
 
 from blockchain import (
+    append_block_idempotent,
+    append_blocks_idempotent,
     get_blocks_after_index,
     get_latest_index,
     load_chain,
     save_chain,
-    verify_block,
+    verify_chain_detailed,
 )
 from config import (
     SECRET_TOKEN,
@@ -53,18 +55,17 @@ def append_valid_block(
     validator_id: str,
     block: dict[str, Any],
 ) -> tuple[bool, str]:
-    """Verify an incoming block against the local tip, then append it."""
+    """Verify an incoming block against the local chain, then append it."""
     chain_file = VALIDATOR_CHAIN_FILES[validator_id]
     chain = load_chain(chain_file)
-    previous_block = chain[-1] if chain else None
 
-    is_valid, errors = verify_block(block, previous_block)
-    if not is_valid:
-        return False, "; ".join(errors)
-
-    chain.append(block)
-    save_chain(chain_file, chain)
-    return True, "accepted and saved"
+    accepted, results = append_blocks_idempotent(chain, [block])
+    action, reason = results[-1]
+    if accepted:
+        if action == "appended":
+            save_chain(chain_file, chain)
+        return True, reason
+    return False, reason
 
 
 def handle_block_message(
@@ -108,6 +109,24 @@ def handle_sync_request(
         return
 
     chain = load_chain(VALIDATOR_CHAIN_FILES[validator_id])
+    chain_is_valid, _chain_errors = verify_chain_detailed(chain)
+    if not chain_is_valid:
+        print(
+            f"{prefix} Refusing sync request from Validator {requester_id}: "
+            "local chain is invalid"
+        )
+        send_json(
+            connection,
+            {
+                "type": "SYNC_RESPONSE",
+                "from_validator": validator_id,
+                "error": "LOCAL_CHAIN_INVALID",
+                "blocks": [],
+                "token": SECRET_TOKEN,
+            },
+        )
+        return
+
     missing_blocks = get_blocks_after_index(chain, latest_index)
     print(
         f"{prefix} Sync request from Validator {requester_id} "
@@ -187,48 +206,44 @@ def request_sync_response(
         return None
 
 
-def append_synced_blocks(
+def validate_sync_response(
     validator_id: str,
     peer_id: str,
-    blocks: list[dict[str, Any]],
-) -> bool:
-    """Verify missing blocks from a peer and append them to the local chain."""
-    chain_file = VALIDATOR_CHAIN_FILES[validator_id]
-    chain = load_chain(chain_file)
-    existing_indexes = {
-        block.get("index") for block in chain if isinstance(block.get("index"), int)
-    }
+    response: dict[str, Any],
+) -> list[dict[str, Any]] | None:
+    """Validate a SYNC_RESPONSE envelope and return its block list."""
     prefix = f"[Validator {validator_id}]"
 
-    for block in blocks:
-        block_index = block.get("index") if isinstance(block, dict) else "?"
-        if isinstance(block_index, int) and block_index in existing_indexes:
-            print(f"{prefix} Skipping duplicate Block #{block_index}")
-            continue
+    if not verify_plain_token(response.get("token", "")):
+        print(f"{prefix} Invalid sync token from Validator {peer_id}")
+        return None
 
-        previous_block = chain[-1] if chain else None
-        is_valid, errors = verify_block(block, previous_block)
-        if not is_valid:
-            print(
-                f"{prefix} Rejected sync from Validator {peer_id} at "
-                f"Block #{block_index}: {'; '.join(errors)}"
-            )
-            return False
+    if response.get("type") != "SYNC_RESPONSE":
+        print(f"{prefix} Invalid sync response from Validator {peer_id}")
+        return None
 
-        chain.append(block)
-        existing_indexes.add(block_index)
-        save_chain(chain_file, chain)
-        print(f"{prefix} Synced Block #{block_index}")
+    if response.get("error") == "LOCAL_CHAIN_INVALID":
+        print(
+            f"{prefix} Peer {peer_id} reported LOCAL_CHAIN_INVALID. "
+            "Ignoring peer for sync."
+        )
+        return None
 
-    return True
+    blocks = response.get("blocks")
+    if not isinstance(blocks, list):
+        print(f"{prefix} Invalid block list from Validator {peer_id}")
+        return None
+
+    print(f"{prefix} Peer {peer_id} responded with {len(blocks)} missing blocks")
+    return blocks
 
 
-def sync_from_peers(validator_id: str) -> None:
-    """Synchronize this validator from the first available valid peer."""
-    chain = load_chain(VALIDATOR_CHAIN_FILES[validator_id])
-    latest_index = get_latest_index(chain)
-    prefix = f"[Validator {validator_id}]"
-    print(f"{prefix} Current latest block: #{latest_index}")
+def collect_sync_responses(
+    validator_id: str,
+    latest_index: int,
+) -> dict[str, list[dict[str, Any]]]:
+    """Request missing blocks from all available peer validators."""
+    peer_blocks: dict[str, list[dict[str, Any]]] = {}
 
     for peer_id in VALIDATOR_IDS:
         if peer_id == validator_id:
@@ -238,28 +253,130 @@ def sync_from_peers(validator_id: str) -> None:
         if response is None:
             continue
 
-        if not verify_plain_token(response.get("token", "")):
-            print(f"{prefix} Invalid sync token from Validator {peer_id}")
+        blocks = validate_sync_response(validator_id, peer_id, response)
+        if blocks is None:
             continue
 
-        if response.get("type") != "SYNC_RESPONSE":
-            print(f"{prefix} Invalid sync response from Validator {peer_id}")
-            continue
+        peer_blocks[peer_id] = blocks
 
-        blocks = response.get("blocks")
-        if not isinstance(blocks, list):
-            print(f"{prefix} Invalid block list from Validator {peer_id}")
-            continue
+    return peer_blocks
 
+
+def select_consistent_blocks(
+    validator_id: str,
+    peer_blocks: dict[str, list[dict[str, Any]]],
+) -> list[dict[str, Any]] | None:
+    """Compare peer block hashes and return a safe ordered block list."""
+    prefix = f"[Validator {validator_id}]"
+    peer_count = len(peer_blocks)
+    if peer_count == 0:
+        return None
+
+    if peer_count == 1:
         print(
-            f"{prefix} Received {len(blocks)} missing blocks "
-            f"from Validator {peer_id}"
+            f"{prefix} Warning: only one sync peer responded. "
+            "Proceeding after local verification."
         )
-        if append_synced_blocks(validator_id, peer_id, blocks):
-            print(f"{prefix} Sync completed")
-            return
+        blocks = next(iter(peer_blocks.values()))
+        return sorted(
+            blocks,
+            key=lambda block: block.get("index", -1)
+            if isinstance(block, dict)
+            else -1,
+        )
 
-    print(f"{prefix} No sync peer available, continuing as server")
+    blocks_by_index: dict[int, dict[str, list[str]]] = {}
+    chosen_blocks: dict[int, dict[str, Any]] = {}
+
+    for peer_id, blocks in peer_blocks.items():
+        for block in blocks:
+            if not isinstance(block, dict):
+                print(f"{prefix} Invalid block object from Validator {peer_id}")
+                print(f"{prefix} Sync aborted due to invalid peer response")
+                return None
+
+            block_index = block.get("index")
+            block_hash = block.get("current_hash")
+            if not isinstance(block_index, int) or not isinstance(block_hash, str):
+                print(f"{prefix} Invalid block metadata from Validator {peer_id}")
+                print(f"{prefix} Sync aborted due to invalid peer response")
+                return None
+
+            blocks_by_index.setdefault(block_index, {}).setdefault(
+                block_hash, []
+            ).append(peer_id)
+            chosen_blocks.setdefault(block_index, block)
+
+    for block_index in sorted(blocks_by_index):
+        hashes = blocks_by_index[block_index]
+        if len(hashes) > 1:
+            print(f"{prefix} Conflict detected at Block #{block_index}")
+            for block_hash, peer_ids in hashes.items():
+                for peer_id in peer_ids:
+                    print(f"{prefix} Peer {peer_id} hash: {block_hash}")
+            print(f"{prefix} Sync aborted due to conflicting peer responses")
+            return None
+
+        peer_ids = next(iter(hashes.values()))
+        if len(peer_ids) < 2:
+            print(
+                f"{prefix} Insufficient quorum at Block #{block_index}: "
+                f"only Validator {peer_ids[0]} returned this block"
+            )
+            print(f"{prefix} Sync aborted due to insufficient peer agreement")
+            return None
+
+    return [chosen_blocks[index] for index in sorted(chosen_blocks)]
+
+
+def append_synced_blocks(
+    validator_id: str,
+    blocks: list[dict[str, Any]],
+) -> bool:
+    """Apply consistent sync blocks with local idempotent verification."""
+    chain_file = VALIDATOR_CHAIN_FILES[validator_id]
+    working_chain = list(load_chain(chain_file))
+    prefix = f"[Validator {validator_id}]"
+    actions: list[tuple[str, str, int | str]] = []
+
+    for block in blocks:
+        block_index = block.get("index") if isinstance(block, dict) else "?"
+        accepted, action, message = append_block_idempotent(working_chain, block)
+        actions.append((action, message, block_index))
+        if not accepted:
+            print(f"{prefix} {message}")
+            print(f"{prefix} Sync aborted during local verification")
+            return False
+
+    save_chain(chain_file, working_chain)
+    for action, message, block_index in actions:
+        if action == "appended":
+            print(f"{prefix} Synced Block #{block_index}")
+        elif action == "skipped":
+            print(f"{prefix} {message}")
+
+    return True
+
+
+def sync_from_peers(validator_id: str) -> None:
+    """Synchronize this validator using available peer agreement."""
+    chain = load_chain(VALIDATOR_CHAIN_FILES[validator_id])
+    latest_index = get_latest_index(chain)
+    prefix = f"[Validator {validator_id}]"
+    print(f"{prefix} Current latest block: #{latest_index}")
+
+    peer_blocks = collect_sync_responses(validator_id, latest_index)
+    if not peer_blocks:
+        print(f"{prefix} No sync peer available, continuing as server")
+        return
+
+    blocks = select_consistent_blocks(validator_id, peer_blocks)
+    if blocks is None:
+        return
+
+    print(f"{prefix} Received {len(blocks)} consistent missing blocks")
+    if append_synced_blocks(validator_id, blocks):
+        print(f"{prefix} Sync completed")
 
 
 def run_validator(validator_id: str) -> None:

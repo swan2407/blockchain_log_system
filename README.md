@@ -245,6 +245,139 @@ Expected:
 Result: All validators are synchronized.
 ```
 
+## Quorum-based Recovery Sync and Conflict Detection
+
+Validator startup recovery now requests missing blocks from every available peer
+validator. When more than one safe peer responds, the recovering validator
+compares returned blocks by index and `current_hash` before appending anything.
+Every accepted block is still verified locally against the recovering
+validator's current chain tip.
+
+If a validator's own local chain is invalid, it refuses to serve sync blocks and
+returns `LOCAL_CHAIN_INVALID`. The recovering validator ignores that peer as an
+unsafe sync source.
+
+### Experiment 1: Normal quorum recovery
+
+1. Reset data:
+
+```bash
+python reset_data.py
+```
+
+2. Start Validator A, B, and C in separate terminals:
+
+```bash
+python validator_node.py A
+python validator_node.py B
+python validator_node.py C
+```
+
+3. Start the producer:
+
+```bash
+python block_producer.py
+```
+
+4. Generate 3 logs:
+
+```bash
+python log_node.py NODE-01 --count 3 --interval 0.5
+```
+
+5. Stop Validator B manually.
+
+6. Generate 3 more logs while B is down:
+
+```bash
+python log_node.py NODE-01 --count 3 --interval 0.5
+```
+
+7. Check validators:
+
+```bash
+python check_validators.py
+```
+
+Expected: Validator B should have fewer blocks and validators should not be
+synchronized.
+
+8. Restart Validator B:
+
+```bash
+python validator_node.py B
+```
+
+Expected: Validator B requests missing blocks from Validator A and Validator C.
+A and C should respond with matching block hashes, and B should sync the missing
+blocks.
+
+9. Check validators again:
+
+```bash
+python check_validators.py
+```
+
+Expected:
+
+```text
+Result: All validators are synchronized.
+```
+
+### Experiment 2: Conflict detection during recovery
+
+1. Reset data:
+
+```bash
+python reset_data.py
+```
+
+2. Start Validator A, B, and C in separate terminals:
+
+```bash
+python validator_node.py A
+python validator_node.py B
+python validator_node.py C
+```
+
+3. Start the producer:
+
+```bash
+python block_producer.py
+```
+
+4. Generate 3 logs:
+
+```bash
+python log_node.py NODE-01 --count 3 --interval 0.5
+```
+
+5. Stop Validator B manually.
+
+6. Generate 3 more logs while B is down:
+
+```bash
+python log_node.py NODE-01 --count 3 --interval 0.5
+```
+
+7. Tamper Validator C block 4:
+
+```bash
+python tamper.py C 4 log
+```
+
+8. Restart Validator B:
+
+```bash
+python validator_node.py B
+```
+
+Expected: Validator B requests missing blocks from A and C. Validator C should
+refuse to serve sync blocks because its local chain is invalid, and B should
+ignore C as an unsafe sync source. If multiple valid peers return different
+`current_hash` values for the same block index, B reports the conflicting peer
+hashes and aborts sync without appending the conflicting blocks.
+
 ## Current Ports
 
 The current default ports are defined in `config.py`:

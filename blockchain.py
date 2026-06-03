@@ -111,6 +111,96 @@ def get_blocks_after_index(
     ]
 
 
+def find_block_by_index(
+    chain: list[dict[str, Any]],
+    index: int,
+) -> dict[str, Any] | None:
+    """Return the block with the requested index, if present."""
+    for block in chain:
+        if isinstance(block, dict) and block.get("index") == index:
+            return block
+    return None
+
+
+def validate_next_block(
+    chain: list[dict[str, Any]],
+    block: dict[str, Any],
+) -> tuple[bool, list[str]]:
+    """Verify that block is the next valid block for chain."""
+    previous_block = chain[-1] if chain else None
+    return verify_block(block, previous_block)
+
+
+def append_block_idempotent(
+    chain: list[dict[str, Any]],
+    block: dict[str, Any],
+) -> tuple[bool, str, str]:
+    """Append a block unless it is already present with the same hash."""
+    if not isinstance(block, dict):
+        return False, "rejected", "Received block is not an object."
+
+    block_index = block.get("index")
+    received_hash = block.get("current_hash")
+    if not isinstance(block_index, int):
+        return False, "rejected", "Received block index is missing or invalid."
+
+    existing_block = find_block_by_index(chain, block_index)
+    if existing_block is not None:
+        existing_hash = existing_block.get("current_hash")
+        if existing_hash == received_hash:
+            return (
+                True,
+                "skipped",
+                f"Block #{block_index} already exists with same hash. Skipping.",
+            )
+        return (
+            False,
+            "conflict",
+            (
+                f"Local conflict at Block #{block_index}: existing hash differs "
+                "from received hash."
+            ),
+        )
+
+    expected_index = get_latest_index(chain) + 1
+    if block_index > expected_index:
+        return (
+            False,
+            "gap",
+            f"Gap detected: received Block #{block_index} but expected #{expected_index}.",
+        )
+    if block_index < expected_index:
+        return (
+            False,
+            "conflict",
+            (
+                f"Local conflict at Block #{block_index}: no matching local block "
+                "exists for an old index."
+            ),
+        )
+
+    is_valid, errors = validate_next_block(chain, block)
+    if not is_valid:
+        return False, "rejected", "; ".join(errors)
+
+    chain.append(block)
+    return True, "appended", f"Block #{block_index} appended."
+
+
+def append_blocks_idempotent(
+    chain: list[dict[str, Any]],
+    blocks: list[dict[str, Any]],
+) -> tuple[bool, list[tuple[str, str]]]:
+    """Append blocks idempotently and stop at the first unsafe block."""
+    results: list[tuple[str, str]] = []
+    for block in blocks:
+        accepted, action, message = append_block_idempotent(chain, block)
+        results.append((action, message))
+        if not accepted:
+            return False, results
+    return True, results
+
+
 def verify_block_detailed(
     block: dict[str, Any],
     previous_block: dict[str, Any] | None,

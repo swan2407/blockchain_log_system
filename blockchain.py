@@ -97,6 +97,20 @@ def get_latest_index(chain: list[dict[str, Any]]) -> int:
     return chain[-1]["index"] if chain else -1
 
 
+def get_blocks_after_index(
+    chain: list[dict[str, Any]],
+    latest_index: int,
+) -> list[dict[str, Any]]:
+    """Return blocks whose index is greater than latest_index."""
+    return [
+        block
+        for block in chain
+        if isinstance(block, dict)
+        and isinstance(block.get("index"), int)
+        and block["index"] > latest_index
+    ]
+
+
 def verify_block_detailed(
     block: dict[str, Any],
     previous_block: dict[str, Any] | None,

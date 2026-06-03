@@ -176,6 +176,75 @@ Tamper modes:
 `tamper.py` does not recalculate hashes. It simulates an attacker modifying
 stored data without repairing the complete hash chain.
 
+## Failure Recovery Experiment
+
+This experiment verifies that a validator can recover blocks it missed while it
+was offline.
+
+1. Reset data:
+
+```bash
+python reset_data.py
+```
+
+2. Start Validator A, B, and C in separate terminals:
+
+```bash
+python validator_node.py A
+python validator_node.py B
+python validator_node.py C
+```
+
+3. Start the producer in another terminal:
+
+```bash
+python block_producer.py
+```
+
+4. Generate initial logs:
+
+```bash
+python log_node.py NODE-01 --count 3 --interval 0.5
+```
+
+5. Stop Validator B manually.
+
+6. Generate more logs while B is down:
+
+```bash
+python log_node.py NODE-01 --count 3 --interval 0.5
+```
+
+7. Check validators:
+
+```bash
+python check_validators.py
+```
+
+Expected: Validator B should have fewer blocks and validators should not be
+synchronized.
+
+8. Restart Validator B:
+
+```bash
+python validator_node.py B
+```
+
+Expected: Validator B should automatically request missing blocks from another
+validator and sync.
+
+9. Check validators again:
+
+```bash
+python check_validators.py
+```
+
+Expected:
+
+```text
+Result: All validators are synchronized.
+```
+
 ## Current Ports
 
 The current default ports are defined in `config.py`:

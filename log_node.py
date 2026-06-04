@@ -10,9 +10,9 @@ from typing import Any
 from config import (
     BLOCK_PRODUCER_HOST,
     BLOCK_PRODUCER_PORT,
-    SECRET_TOKEN,
     SOCKET_TIMEOUT_SECONDS,
 )
+from crypto_utils import attach_signature, verify_message_signature
 from network_utils import recv_json, send_json
 
 
@@ -26,19 +26,28 @@ LOG_MESSAGES = [
 
 def send_log(node_id: str, log_message: str) -> dict[str, Any]:
     """Send one LOG message to the block producer."""
-    message = {
-        "type": "LOG",
-        "node_id": node_id,
-        "message": log_message,
-        "token": SECRET_TOKEN,
-    }
+    message = attach_signature(
+        {
+            "type": "LOG",
+            "node_id": node_id,
+            "message": log_message,
+        },
+        sender_id=node_id,
+    )
 
     with socket.create_connection(
         (BLOCK_PRODUCER_HOST, BLOCK_PRODUCER_PORT),
         timeout=SOCKET_TIMEOUT_SECONDS,
     ) as client_socket:
         send_json(client_socket, message)
-        return recv_json(client_socket)
+        response = recv_json(client_socket)
+
+    is_valid, reason = verify_message_signature(response)
+    if not is_valid:
+        raise ValueError(f"invalid producer response: {reason}")
+    if response.get("sender_id") != "PRODUCER":
+        raise ValueError("invalid producer response: unexpected sender_id")
+    return response
 
 
 def run_log_node(node_id: str, count: int, interval: float) -> None:

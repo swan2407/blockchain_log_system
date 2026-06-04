@@ -1,1 +1,152 @@
-[]
+[
+  {
+    "index": 0,
+    "timestamp": 1780594094.165504,
+    "log_data": {
+      "node_id": "NODE-01",
+      "message": "STATUS=NORMAL ACTION=BOOT"
+    },
+    "previous_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "current_hash": "dd614cc65c90b7d37bca2ef06b370fb9245fded6344b263b044cd20cb7e2a566",
+    "commit_proof": {
+      "quorum": 2,
+      "acks": [
+        {
+          "validator_id": "A",
+          "block_index": 0,
+          "block_hash": "dd614cc65c90b7d37bca2ef06b370fb9245fded6344b263b044cd20cb7e2a566"
+        },
+        {
+          "validator_id": "B",
+          "block_index": 0,
+          "block_hash": "dd614cc65c90b7d37bca2ef06b370fb9245fded6344b263b044cd20cb7e2a566"
+        },
+        {
+          "validator_id": "C",
+          "block_index": 0,
+          "block_hash": "dd614cc65c90b7d37bca2ef06b370fb9245fded6344b263b044cd20cb7e2a566"
+        }
+      ]
+    }
+  },
+  {
+    "index": 1,
+    "timestamp": 1780594094.7138271,
+    "log_data": {
+      "node_id": "NODE-01",
+      "message": "STATUS=NORMAL ACTION=HEARTBEAT"
+    },
+    "previous_hash": "dd614cc65c90b7d37bca2ef06b370fb9245fded6344b263b044cd20cb7e2a566",
+    "current_hash": "e6d8a4daa12b063ecbe42cfca467b8bf0f181a306cd9feadf551fe691ef775ab",
+    "commit_proof": {
+      "quorum": 2,
+      "acks": [
+        {
+          "validator_id": "A",
+          "block_index": 1,
+          "block_hash": "e6d8a4daa12b063ecbe42cfca467b8bf0f181a306cd9feadf551fe691ef775ab"
+        },
+        {
+          "validator_id": "B",
+          "block_index": 1,
+          "block_hash": "e6d8a4daa12b063ecbe42cfca467b8bf0f181a306cd9feadf551fe691ef775ab"
+        },
+        {
+          "validator_id": "C",
+          "block_index": 1,
+          "block_hash": "e6d8a4daa12b063ecbe42cfca467b8bf0f181a306cd9feadf551fe691ef775ab"
+        }
+      ]
+    }
+  },
+  {
+    "index": 2,
+    "timestamp": 1780594095.2280347,
+    "log_data": {
+      "node_id": "NODE-01",
+      "message": "STATUS=WARNING ACTION=HIGH_CPU"
+    },
+    "previous_hash": "e6d8a4daa12b063ecbe42cfca467b8bf0f181a306cd9feadf551fe691ef775ab",
+    "current_hash": "80f2533a4cd325c753b2d3b7ab2764129762910ccdef6b2c3fdcd30bb8024b92",
+    "commit_proof": {
+      "quorum": 2,
+      "acks": [
+        {
+          "validator_id": "A",
+          "block_index": 2,
+          "block_hash": "80f2533a4cd325c753b2d3b7ab2764129762910ccdef6b2c3fdcd30bb8024b92"
+        },
+        {
+          "validator_id": "B",
+          "block_index": 2,
+          "block_hash": "80f2533a4cd325c753b2d3b7ab2764129762910ccdef6b2c3fdcd30bb8024b92"
+        },
+        {
+          "validator_id": "C",
+          "block_index": 2,
+          "block_hash": "80f2533a4cd325c753b2d3b7ab2764129762910ccdef6b2c3fdcd30bb8024b92"
+        }
+      ]
+    }
+  },
+  {
+    "index": 3,
+    "timestamp": 1780594095.8116565,
+    "log_data": {
+      "node_id": "NODE-01",
+      "message": "STATUS=NORMAL ACTION=CHECK"
+    },
+    "previous_hash": "80f2533a4cd325c753b2d3b7ab2764129762910ccdef6b2c3fdcd30bb8024b92",
+    "current_hash": "7c4dd44f2d81a2afb514c3597bf01362416e4e469fd650b211fa1bff2b33f7f5",
+    "commit_proof": {
+      "quorum": 2,
+      "acks": [
+        {
+          "validator_id": "A",
+          "block_index": 3,
+          "block_hash": "7c4dd44f2d81a2afb514c3597bf01362416e4e469fd650b211fa1bff2b33f7f5"
+        },
+        {
+          "validator_id": "B",
+          "block_index": 3,
+          "block_hash": "7c4dd44f2d81a2afb514c3597bf01362416e4e469fd650b211fa1bff2b33f7f5"
+        },
+        {
+          "validator_id": "C",
+          "block_index": 3,
+          "block_hash": "7c4dd44f2d81a2afb514c3597bf01362416e4e469fd650b211fa1bff2b33f7f5"
+        }
+      ]
+    }
+  },
+  {
+    "index": 4,
+    "timestamp": 1780594096.3444405,
+    "log_data": {
+      "node_id": "NODE-01",
+      "message": "STATUS=NORMAL ACTION=BOOT"
+    },
+    "previous_hash": "7c4dd44f2d81a2afb514c3597bf01362416e4e469fd650b211fa1bff2b33f7f5",
+    "current_hash": "5d23313dec2b86d65406a14eb84adee71310384b5929bdb0974d76935aec2cb0",
+    "commit_proof": {
+      "quorum": 2,
+      "acks": [
+        {
+          "validator_id": "A",
+          "block_index": 4,
+          "block_hash": "5d23313dec2b86d65406a14eb84adee71310384b5929bdb0974d76935aec2cb0"
+        },
+        {
+          "validator_id": "B",
+          "block_index": 4,
+          "block_hash": "5d23313dec2b86d65406a14eb84adee71310384b5929bdb0974d76935aec2cb0"
+        },
+        {
+          "validator_id": "C",
+          "block_index": 4,
+          "block_hash": "5d23313dec2b86d65406a14eb84adee71310384b5929bdb0974d76935aec2cb0"
+        }
+      ]
+    }
+  }
+]

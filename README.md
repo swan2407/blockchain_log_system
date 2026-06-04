@@ -89,8 +89,8 @@ its peers before serving new requests.
 
 | Path | Responsibility |
 |---|---|
-| `config.py` | Defines ports, validator addresses, chain paths, token, timeouts, and shared constants. |
-| `crypto_utils.py` | Provides SHA-256 hashing and simple token verification helpers. |
+| `config.py` | Defines ports, validator addresses, chain paths, shared secret, timeouts, and shared constants. |
+| `crypto_utils.py` | Provides SHA-256 block hashing and HMAC-SHA256 message authentication helpers. |
 | `network_utils.py` | Sends and receives length-prefixed JSON messages over TCP. |
 | `blockchain.py` | Creates and verifies blocks, validates commit proofs, loads and atomically saves chains, and performs idempotent appends. |
 | `log_node.py` | Generates equipment-style log messages and sends `LOG` requests to the producer. |
@@ -123,6 +123,33 @@ time.
 This framing also defines a clear interoperability contract for the future
 C-based log sender. A C client must encode the payload as UTF-8 JSON and send
 its byte length in network byte order before the payload.
+
+## HMAC-SHA256 Message Authentication
+
+The previous network protocol included a plain shared token. That proved only
+that a sender knew the token and did not protect the rest of the message from
+modification.
+
+Every network message is now authenticated with HMAC-SHA256 and includes:
+
+- `sender_id`
+- `timestamp`
+- `signature`
+
+The signature is computed using the shared secret over a canonical JSON
+representation of the complete message excluding `signature`. Canonical JSON
+uses sorted keys and compact separators so independently serialized messages
+produce the same signature.
+
+Receivers verify the HMAC with `hmac.compare_digest()`, reject messages older
+than five minutes, and confirm the expected sender identity before processing
+the message. This protects LOG, proposal, ACK/NACK, commit, sync, success, and
+error envelopes against undetected modification in transit. Validator ACKs are
+verified before they count toward quorum.
+
+This remains prototype-level authentication. It does not encrypt traffic,
+prevent replay within the accepted timestamp window, provide per-node keys, or
+replace TLS and production-grade key management.
 
 ## Block Structure
 
@@ -338,6 +365,12 @@ Run the focused protocol tests:
 python test_network_utils.py
 ```
 
+Run the focused HMAC authentication tests:
+
+```bash
+python test_crypto_utils.py
+```
+
 ## Experiments
 
 Use `python reset_data.py` before each experiment unless the procedure says
@@ -466,6 +499,7 @@ Expected behavior:
 | Feature | Status |
 |---|---|
 | Length-prefixed Python TCP/JSON communication | Completed |
+| HMAC-SHA256 network message authentication | Completed |
 | SHA-256 hash-chained blocks | Completed |
 | Independent Validator A/B/C storage | Completed |
 | Full chain verification | Completed |
@@ -486,9 +520,13 @@ Expected behavior:
 - There is no leader election, term management, or automatic producer failover.
 - The producer remains a single leader-like component and a potential single
   point of failure.
-- `commit_proof` ACK entries are not cryptographically signed.
-- Token authentication is intentionally simple and is not suitable for
-  production security.
+- Stored `commit_proof` ACK entries do not retain their network HMAC signatures.
+- HMAC authentication is intentionally prototype-level and is not suitable for
+  production security by itself.
+- All nodes currently share one HMAC secret, so cryptographic signatures do not
+  prove which specific node created a message if that secret is compromised.
+- Timestamp validation rejects old messages but does not prevent replay within
+  the five-minute acceptance window.
 - TCP messages are limited to 10 MiB, but the protocol does not yet negotiate
   versions or capabilities.
 - JSON file storage is suitable for prototype experiments, not high-throughput
@@ -503,8 +541,7 @@ Expected behavior:
 - Further harden atomic file writes with directory synchronization, backups,
   and tested crash-recovery procedures.
 - Add protocol versioning and structured error codes.
-- Replace the plain shared token with HMAC-based authentication and replay
-  protection.
+- Add per-node keys, nonce-based replay protection, key rotation, and TLS.
 - Implement the planned C-based log sender in `c_client/`.
 - Automate normal, failure, tamper, recovery, and quorum experiments through
   `run_experiment.py`.

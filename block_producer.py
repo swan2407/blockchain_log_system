@@ -9,17 +9,38 @@ from blockchain import add_commit_proof, create_block, get_latest_hash
 from config import (
     BLOCK_PRODUCER_HOST,
     BLOCK_PRODUCER_PORT,
-    SECRET_TOKEN,
     SOCKET_BACKLOG,
     SOCKET_TIMEOUT_SECONDS,
     VALIDATOR_IDS,
     VALIDATORS,
 )
-from crypto_utils import verify_plain_token
+from crypto_utils import attach_signature, verify_message_signature
 from network_utils import recv_json, send_json
 
 
 producer_chain: list[dict[str, Any]] = []
+PRODUCER_ID = "PRODUCER"
+
+
+def send_producer_message(
+    connection: socket.socket,
+    message: dict[str, Any],
+) -> None:
+    """Sign and send one producer message."""
+    send_json(connection, attach_signature(message, PRODUCER_ID))
+
+
+def verify_validator_response(
+    response: dict[str, Any],
+    validator_id: str,
+) -> tuple[bool, str]:
+    """Verify a response came from the expected validator."""
+    is_valid, reason = verify_message_signature(response)
+    if not is_valid:
+        return False, reason
+    if response.get("sender_id") != f"VALIDATOR_{validator_id}":
+        return False, "unexpected sender_id"
+    return True, "ok"
 
 
 def create_block_from_log(log_message: dict[str, Any]) -> dict[str, Any]:
@@ -42,11 +63,10 @@ def propose_block_to_validator(
 ) -> dict[str, Any] | None:
     """Propose a candidate block and return a validated ACCEPT ACK."""
     validator = VALIDATORS[validator_id]
-    outbound_message = {
-        "type": "PROPOSE_BLOCK",
-        "block": block,
-        "token": SECRET_TOKEN,
-    }
+    outbound_message = attach_signature(
+        {"type": "PROPOSE_BLOCK", "block": block},
+        PRODUCER_ID,
+    )
 
     try:
         with socket.create_connection(
@@ -65,6 +85,17 @@ def propose_block_to_validator(
     if not isinstance(response, dict):
         print(
             f"[Producer] Validator {validator_id} returned an invalid proposal response"
+        )
+        return None
+
+    signature_is_valid, signature_reason = verify_validator_response(
+        response,
+        validator_id,
+    )
+    if not signature_is_valid:
+        print(
+            f"[Producer] Rejected response from Validator {validator_id}: "
+            f"{signature_reason}"
         )
         return None
 
@@ -90,7 +121,7 @@ def propose_block_to_validator(
 def send_commit_to_validator(validator_id: str, block: dict[str, Any]) -> bool:
     """Send a quorum-committed block to one validator."""
     validator = VALIDATORS[validator_id]
-    message = {"type": "COMMIT_BLOCK", "block": block, "token": SECRET_TOKEN}
+    message = attach_signature({"type": "COMMIT_BLOCK", "block": block}, PRODUCER_ID)
     try:
         with socket.create_connection(
             (validator["host"], validator["port"]),
@@ -107,6 +138,17 @@ def send_commit_to_validator(validator_id: str, block: dict[str, Any]) -> bool:
 
     if not isinstance(response, dict):
         print(f"[Producer] Validator {validator_id} returned an invalid commit response")
+        return False
+
+    signature_is_valid, signature_reason = verify_validator_response(
+        response,
+        validator_id,
+    )
+    if not signature_is_valid:
+        print(
+            f"[Producer] Rejected response from Validator {validator_id}: "
+            f"{signature_reason}"
+        )
         return False
 
     if response.get("status") == "OK":
@@ -150,24 +192,39 @@ def handle_log_connection(
     try:
         message = recv_json(connection)
 
-        if not verify_plain_token(message.get("token", "")):
-            print(f"[Producer] Invalid token from {address[0]}:{address[1]}")
-            send_json(connection, {"status": "ERROR", "reason": "invalid token"})
+        is_valid, reason = verify_message_signature(message)
+        if not is_valid:
+            print(f"[Producer] Rejected message: {reason}")
+            send_producer_message(connection, {"status": "ERROR", "reason": reason})
             return
 
         if message.get("type") != "LOG":
-            send_json(connection, {"status": "ERROR", "reason": "invalid LOG type"})
+            send_producer_message(
+                connection,
+                {"status": "ERROR", "reason": "invalid LOG type"},
+            )
             return
 
         if not message.get("node_id") or not message.get("message"):
-            send_json(connection, {"status": "ERROR", "reason": "missing log fields"})
+            send_producer_message(
+                connection,
+                {"status": "ERROR", "reason": "missing log fields"},
+            )
+            return
+
+        if message.get("sender_id") != message["node_id"]:
+            print("[Producer] Rejected message: sender_id does not match node_id")
+            send_producer_message(
+                connection,
+                {"status": "ERROR", "reason": "sender_id does not match node_id"},
+            )
             return
 
         print(f"[Producer] Received log from {message['node_id']}")
         block = create_block_from_log(message)
         print(f"[Producer] Created Block #{block['index']}")
         if not commit_candidate(block):
-            send_json(
+            send_producer_message(
                 connection,
                 {
                     "status": "ERROR",
@@ -177,7 +234,7 @@ def handle_log_connection(
             )
             return
 
-        send_json(
+        send_producer_message(
             connection,
             {
                 "status": "OK",
@@ -191,7 +248,7 @@ def handle_log_connection(
     except Exception as exc:
         print(f"[Producer] Error while handling {address[0]}:{address[1]}: {exc}")
         try:
-            send_json(connection, {"status": "ERROR", "reason": str(exc)})
+            send_producer_message(connection, {"status": "ERROR", "reason": str(exc)})
         except OSError:
             pass
 

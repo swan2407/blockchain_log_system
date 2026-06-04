@@ -19,7 +19,6 @@ from blockchain import (
     verify_chain_detailed,
 )
 from config import (
-    SECRET_TOKEN,
     SOCKET_BACKLOG,
     SOCKET_TIMEOUT_SECONDS,
     VALIDATOR_CHAIN_FILES,
@@ -27,8 +26,22 @@ from config import (
     VALIDATORS,
     ensure_data_dir,
 )
-from crypto_utils import verify_plain_token
+from crypto_utils import attach_signature, verify_message_signature
 from network_utils import recv_json, send_json
+
+
+def validator_sender_id(validator_id: str) -> str:
+    """Return the network sender ID for a validator."""
+    return f"VALIDATOR_{validator_id}"
+
+
+def send_validator_message(
+    validator_id: str,
+    connection: socket.socket,
+    message: dict[str, Any],
+) -> None:
+    """Sign and send one validator message."""
+    send_json(connection, attach_signature(message, validator_sender_id(validator_id)))
 
 
 def ack_message(
@@ -58,7 +71,8 @@ def handle_propose_block(
     """Verify a proposed block without storing it."""
     prefix = f"[Validator {validator_id}]"
     if not isinstance(message.get("block"), dict):
-        send_json(
+        send_validator_message(
+            validator_id,
             connection,
             ack_message(validator_id, {}, "REJECT", "invalid proposed block"),
         )
@@ -70,12 +84,20 @@ def handle_propose_block(
     is_valid, errors = validate_next_block(chain, block)
     if is_valid:
         print(f"{prefix} ACK Block #{block_index}")
-        send_json(connection, ack_message(validator_id, block, "ACCEPT"))
+        send_validator_message(
+            validator_id,
+            connection,
+            ack_message(validator_id, block, "ACCEPT"),
+        )
         return
 
     reason = "; ".join(errors)
     print(f"{prefix} NACK Block #{block_index}: {reason}")
-    send_json(connection, ack_message(validator_id, block, "REJECT", reason))
+    send_validator_message(
+        validator_id,
+        connection,
+        ack_message(validator_id, block, "REJECT", reason),
+    )
 
 
 def handle_commit_block(
@@ -87,14 +109,22 @@ def handle_commit_block(
     prefix = f"[Validator {validator_id}]"
     block = message.get("block")
     if not isinstance(block, dict):
-        send_json(connection, {"status": "ERROR", "reason": "invalid committed block"})
+        send_validator_message(
+            validator_id,
+            connection,
+            {"status": "ERROR", "reason": "invalid committed block"},
+        )
         return
 
     proof_is_valid, proof_errors = validate_commit_proof(block)
     if not proof_is_valid:
         reason = "; ".join(proof_errors)
         print(f"{prefix} Invalid commit proof rejected: {reason}")
-        send_json(connection, {"status": "ERROR", "reason": reason})
+        send_validator_message(
+            validator_id,
+            connection,
+            {"status": "ERROR", "reason": reason},
+        )
         return
 
     chain_file = VALIDATOR_CHAIN_FILES[validator_id]
@@ -106,12 +136,20 @@ def handle_commit_block(
             print(f"{prefix} Committed Block #{block['index']} saved")
         else:
             print(f"{prefix} {result['reason']}")
-        send_json(connection, {"status": "OK", "reason": result["reason"]})
+        send_validator_message(
+            validator_id,
+            connection,
+            {"status": "OK", "reason": result["reason"]},
+        )
     else:
         print(
             f"{prefix} Committed block {result['action']}: {result['reason']}"
         )
-        send_json(connection, {"status": "ERROR", "reason": result["reason"]})
+        send_validator_message(
+            validator_id,
+            connection,
+            {"status": "ERROR", "reason": result["reason"]},
+        )
 
 
 def handle_sync_request(
@@ -125,7 +163,11 @@ def handle_sync_request(
     requester_id = message.get("from_validator", "?")
 
     if not isinstance(latest_index, int):
-        send_json(connection, {"status": "ERROR", "reason": "invalid latest_index"})
+        send_validator_message(
+            validator_id,
+            connection,
+            {"status": "ERROR", "reason": "invalid latest_index"},
+        )
         return
 
     chain = load_chain(VALIDATOR_CHAIN_FILES[validator_id])
@@ -136,14 +178,14 @@ def handle_sync_request(
             f"{prefix} Refusing sync request from Validator {requester_id}: "
             "local chain is invalid"
         )
-        send_json(
+        send_validator_message(
+            validator_id,
             connection,
             {
                 "type": "SYNC_RESPONSE",
                 "from_validator": validator_id,
                 "error": "LOCAL_CHAIN_INVALID",
                 "blocks": [],
-                "token": SECRET_TOKEN,
             },
         )
         return
@@ -153,13 +195,13 @@ def handle_sync_request(
         f"{prefix} Sync request from Validator {requester_id} "
         f"starting after #{latest_index}: {len(missing_blocks)} block(s)"
     )
-    send_json(
+    send_validator_message(
+        validator_id,
         connection,
         {
             "type": "SYNC_RESPONSE",
             "from_validator": validator_id,
             "blocks": missing_blocks,
-            "token": SECRET_TOKEN,
         },
     )
 
@@ -174,18 +216,41 @@ def handle_connection(
     try:
         message = recv_json(connection)
 
-        if not verify_plain_token(message.get("token", "")):
-            print(f"{prefix} Invalid token from {address[0]}:{address[1]}")
-            send_json(connection, {"status": "ERROR", "reason": "invalid token"})
+        is_valid, reason = verify_message_signature(message)
+        if not is_valid:
+            print(f"{prefix} Rejected request: {reason}")
+            send_validator_message(
+                validator_id,
+                connection,
+                {"status": "ERROR", "reason": reason},
+            )
             return
 
         message_type = message.get("type")
+        expected_sender = None
+        if message_type in {"PROPOSE_BLOCK", "COMMIT_BLOCK", "BLOCK"}:
+            expected_sender = "PRODUCER"
+        elif message_type == "SYNC_REQUEST":
+            from_validator = message.get("from_validator")
+            if isinstance(from_validator, str):
+                expected_sender = validator_sender_id(from_validator)
+
+        if expected_sender is None or message.get("sender_id") != expected_sender:
+            print(f"{prefix} Rejected request: unexpected sender_id")
+            send_validator_message(
+                validator_id,
+                connection,
+                {"status": "ERROR", "reason": "unexpected sender_id"},
+            )
+            return
+
         if message_type == "PROPOSE_BLOCK":
             handle_propose_block(validator_id, connection, message)
         elif message_type == "COMMIT_BLOCK":
             handle_commit_block(validator_id, connection, message)
         elif message_type == "BLOCK":
-            send_json(
+            send_validator_message(
+                validator_id,
                 connection,
                 {"status": "ERROR", "reason": "legacy BLOCK rejected; commit proof required"},
             )
@@ -193,14 +258,22 @@ def handle_connection(
             handle_sync_request(validator_id, connection, message)
         else:
             print(f"{prefix} Invalid message rejected")
-            send_json(connection, {"status": "ERROR", "reason": "invalid message"})
+            send_validator_message(
+                validator_id,
+                connection,
+                {"status": "ERROR", "reason": "invalid message"},
+            )
     except (ConnectionError, UnicodeError, ValueError) as exc:
         print(f"[Network] Failed to receive JSON message: {exc}")
         print(f"{prefix} Failed to handle request: {exc}")
     except Exception as exc:
         print(f"{prefix} Error while handling {address[0]}:{address[1]}: {exc}")
         try:
-            send_json(connection, {"status": "ERROR", "reason": str(exc)})
+            send_validator_message(
+                validator_id,
+                connection,
+                {"status": "ERROR", "reason": str(exc)},
+            )
         except OSError:
             pass
 
@@ -218,12 +291,14 @@ def request_sync_response(
         f"starting after #{latest_index}"
     )
 
-    request = {
-        "type": "SYNC_REQUEST",
-        "from_validator": validator_id,
-        "latest_index": latest_index,
-        "token": SECRET_TOKEN,
-    }
+    request = attach_signature(
+        {
+            "type": "SYNC_REQUEST",
+            "from_validator": validator_id,
+            "latest_index": latest_index,
+        },
+        validator_sender_id(validator_id),
+    )
 
     try:
         with socket.create_connection(
@@ -245,8 +320,13 @@ def validate_sync_response(
     """Validate a SYNC_RESPONSE envelope and return its block list."""
     prefix = f"[Validator {validator_id}]"
 
-    if not verify_plain_token(response.get("token", "")):
-        print(f"{prefix} Invalid sync token from Validator {peer_id}")
+    is_valid, reason = verify_message_signature(response)
+    if not is_valid:
+        print(f"{prefix} Rejected sync response from Validator {peer_id}: {reason}")
+        return None
+
+    if response.get("sender_id") != validator_sender_id(peer_id):
+        print(f"{prefix} Invalid sync sender_id from Validator {peer_id}")
         return None
 
     if response.get("type") != "SYNC_RESPONSE":

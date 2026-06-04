@@ -449,6 +449,34 @@ The current default ports are defined in `config.py`:
 - validator B: `127.0.0.1:9102`
 - validator C: `127.0.0.1:9103`
 
+## Atomic File Write and Idempotent Storage
+
+Validator chain files are not overwritten directly. `save_chain()` writes the
+complete JSON chain to a sibling `.tmp` file, flushes Python's file buffer,
+calls `fsync()` to request durable storage, and then uses `os.replace()` to
+atomically replace the original chain file. If writing fails before replacement,
+the previous chain file remains unchanged and the temporary file is removed
+when possible.
+
+Missing and empty chain files are treated as empty chains. Existing files with
+invalid JSON are reported as storage errors instead of being silently treated
+as empty, preventing a validator from overwriting corrupted committed state.
+
+Committed and synced blocks use idempotent append handling. Receiving the same
+block index and hash again is a successful skip, so repeated `COMMIT_BLOCK`
+messages do not duplicate blocks. A different hash at an existing index is a
+conflict, a future index is a gap, and an invalid next block is rejected before
+the local chain is saved.
+
+Manual storage verification:
+
+1. Run `python reset_data.py`, start all validators and the producer, then
+   generate logs normally.
+2. Retry the same `COMMIT_BLOCK`; the validator should report that the block
+   already exists and the chain length should remain unchanged.
+3. Run `python check_validators.py`; all chains and commit proofs should remain
+   valid.
+
 ## Compile Checks
 
 Compile the communication scripts:

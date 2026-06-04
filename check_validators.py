@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from blockchain import (
+    ChainLoadError,
     get_latest_hash,
     get_latest_index,
     load_chain,
@@ -97,8 +98,20 @@ def check_validators() -> bool:
 
     print("Validator chain status:")
     for validator_id in VALIDATOR_IDS:
-        chain = load_chain(VALIDATOR_CHAIN_FILES[validator_id])
-        is_valid, errors = verify_chain_detailed(chain)
+        try:
+            chain = load_chain(VALIDATOR_CHAIN_FILES[validator_id])
+            is_valid, errors = verify_chain_detailed(chain)
+        except ChainLoadError as exc:
+            chain = []
+            is_valid = False
+            errors = [
+                {
+                    "position": 0,
+                    "block_index": None,
+                    "reason": "storage error",
+                    "message": str(exc),
+                }
+            ]
 
         chains[validator_id] = chain
         validities[validator_id] = is_valid

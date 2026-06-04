@@ -8,6 +8,7 @@ import socket
 from typing import Any
 
 from blockchain import (
+    ChainLoadError,
     append_block_idempotent,
     get_blocks_after_index,
     get_latest_index,
@@ -121,15 +122,19 @@ def handle_commit_block(
 
     chain_file = VALIDATOR_CHAIN_FILES[validator_id]
     chain = load_chain(chain_file)
-    accepted, action, reason = append_block_idempotent(chain, block)
-    if accepted:
-        if action == "appended":
+    result = append_block_idempotent(chain, block)
+    if result["success"]:
+        if result["action"] == "appended":
             save_chain(chain_file, chain)
             print(f"{prefix} Committed Block #{block['index']} saved")
-        send_json(connection, {"status": "OK", "reason": reason})
+        else:
+            print(f"{prefix} {result['reason']}")
+        send_json(connection, {"status": "OK", "reason": result["reason"]})
     else:
-        print(f"{prefix} Invalid committed block rejected: {reason}")
-        send_json(connection, {"status": "ERROR", "reason": reason})
+        print(
+            f"{prefix} Committed block {result['action']}: {result['reason']}"
+        )
+        send_json(connection, {"status": "ERROR", "reason": result["reason"]})
 
 
 def handle_sync_request(
@@ -383,7 +388,7 @@ def append_synced_blocks(
     chain_file = VALIDATOR_CHAIN_FILES[validator_id]
     working_chain = list(load_chain(chain_file))
     prefix = f"[Validator {validator_id}]"
-    actions: list[tuple[str, str, int | str]] = []
+    actions: list[tuple[dict[str, Any], int | str]] = []
 
     for block in blocks:
         block_index = block.get("index") if isinstance(block, dict) else "?"
@@ -395,19 +400,19 @@ def append_synced_blocks(
             )
             print(f"{prefix} Sync aborted during commit proof verification")
             return False
-        accepted, action, message = append_block_idempotent(working_chain, block)
-        actions.append((action, message, block_index))
-        if not accepted:
-            print(f"{prefix} {message}")
+        result = append_block_idempotent(working_chain, block)
+        actions.append((result, block_index))
+        if not result["success"]:
+            print(f"{prefix} {result['action']}: {result['reason']}")
             print(f"{prefix} Sync aborted during local verification")
             return False
 
     save_chain(chain_file, working_chain)
-    for action, message, block_index in actions:
-        if action == "appended":
+    for result, block_index in actions:
+        if result["action"] == "appended":
             print(f"{prefix} Synced Block #{block_index}")
-        elif action == "skipped":
-            print(f"{prefix} {message}")
+        elif result["action"] == "skipped":
+            print(f"{prefix} {result['reason']}")
 
     return True
 
@@ -440,7 +445,14 @@ def run_validator(validator_id: str) -> None:
     if not chain_file.exists():
         save_chain(chain_file, [])
 
-    sync_from_peers(validator_id)
+    try:
+        sync_from_peers(validator_id)
+    except ChainLoadError as exc:
+        print(
+            f"[Validator {validator_id}] Refusing to start with unreadable "
+            f"local chain: {exc}"
+        )
+        return
 
     host = VALIDATORS[validator_id]["host"]
     port = VALIDATORS[validator_id]["port"]

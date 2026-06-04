@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 from config import GENESIS_PREVIOUS_HASH, ensure_data_dir
 from crypto_utils import calculate_hash
@@ -18,6 +19,23 @@ REQUIRED_BLOCK_FIELDS = {
     "previous_hash",
     "current_hash",
 }
+
+
+class ChainLoadError(ValueError):
+    """Raised when an existing validator chain file cannot be loaded safely."""
+
+
+class AppendResult(TypedDict):
+    """Structured result from an idempotent append attempt."""
+
+    success: bool
+    action: str
+    reason: str
+
+
+def append_result(success: bool, action: str, reason: str) -> AppendResult:
+    """Build a consistent idempotent append result."""
+    return {"success": success, "action": action, "reason": reason}
 
 
 def calculate_block_hash(block: dict[str, Any]) -> str:
@@ -118,31 +136,52 @@ def has_valid_commit_proof(block: dict[str, Any], quorum_size: int = 2) -> bool:
 
 
 def load_chain(chain_file: str | Path) -> list[dict[str, Any]]:
-    """Load a validator chain from disk. Missing files are treated as empty."""
+    """Load a chain, treating missing and empty files as empty chains."""
     ensure_data_dir()
     path = Path(chain_file)
 
     if not path.exists():
         return []
 
-    with path.open("r", encoding="utf-8") as file:
-        chain = json.load(file)
+    try:
+        with path.open("r", encoding="utf-8") as file:
+            contents = file.read()
+        if not contents.strip():
+            return []
+        chain = json.loads(contents)
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        message = f"Unable to load chain file {path}: {exc}"
+        print(f"[Storage] Warning: {message}")
+        raise ChainLoadError(message) from exc
 
     if not isinstance(chain, list):
-        raise ValueError(f"Invalid chain file format: {path}")
+        message = f"Invalid chain file format in {path}: expected a JSON list"
+        print(f"[Storage] Warning: {message}")
+        raise ChainLoadError(message)
 
     return chain
 
 
 def save_chain(chain_file: str | Path, chain: list[dict[str, Any]]) -> None:
-    """Persist a validator chain as readable JSON."""
+    """Atomically persist a validator chain as readable JSON."""
     ensure_data_dir()
     path = Path(chain_file)
     path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = Path(f"{path}.tmp")
 
-    with path.open("w", encoding="utf-8") as file:
-        json.dump(chain, file, indent=2, ensure_ascii=True)
-        file.write("\n")
+    try:
+        with tmp_path.open("w", encoding="utf-8") as file:
+            json.dump(chain, file, indent=2, ensure_ascii=True)
+            file.write("\n")
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
 
 def append_block(chain_file: str | Path, log_data: Any) -> dict[str, Any]:
@@ -208,26 +247,28 @@ def validate_next_block(
 def append_block_idempotent(
     chain: list[dict[str, Any]],
     block: dict[str, Any],
-) -> tuple[bool, str, str]:
+) -> AppendResult:
     """Append a block unless it is already present with the same hash."""
     if not isinstance(block, dict):
-        return False, "rejected", "Received block is not an object."
+        return append_result(False, "invalid", "Received block is not an object.")
 
     block_index = block.get("index")
     received_hash = block.get("current_hash")
     if not isinstance(block_index, int):
-        return False, "rejected", "Received block index is missing or invalid."
+        return append_result(
+            False, "invalid", "Received block index is missing or invalid."
+        )
 
     existing_block = find_block_by_index(chain, block_index)
     if existing_block is not None:
         existing_hash = existing_block.get("current_hash")
         if existing_hash == received_hash:
-            return (
+            return append_result(
                 True,
                 "skipped",
                 f"Block #{block_index} already exists with same hash. Skipping.",
             )
-        return (
+        return append_result(
             False,
             "conflict",
             (
@@ -238,13 +279,13 @@ def append_block_idempotent(
 
     expected_index = get_latest_index(chain) + 1
     if block_index > expected_index:
-        return (
+        return append_result(
             False,
             "gap",
             f"Gap detected: received Block #{block_index} but expected #{expected_index}.",
         )
     if block_index < expected_index:
-        return (
+        return append_result(
             False,
             "conflict",
             (
@@ -255,22 +296,22 @@ def append_block_idempotent(
 
     is_valid, errors = validate_next_block(chain, block)
     if not is_valid:
-        return False, "rejected", "; ".join(errors)
+        return append_result(False, "invalid", "; ".join(errors))
 
     chain.append(block)
-    return True, "appended", f"Block #{block_index} appended."
+    return append_result(True, "appended", f"Block #{block_index} appended.")
 
 
 def append_blocks_idempotent(
     chain: list[dict[str, Any]],
     blocks: list[dict[str, Any]],
-) -> tuple[bool, list[tuple[str, str]]]:
+) -> tuple[bool, list[AppendResult]]:
     """Append blocks idempotently and stop at the first unsafe block."""
-    results: list[tuple[str, str]] = []
+    results: list[AppendResult] = []
     for block in blocks:
-        accepted, action, message = append_block_idempotent(chain, block)
-        results.append((action, message))
-        if not accepted:
+        result = append_block_idempotent(chain, block)
+        results.append(result)
+        if not result["success"]:
             return False, results
     return True, results
 

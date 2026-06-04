@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import socket
 from typing import Any
 
@@ -17,32 +16,10 @@ from config import (
     VALIDATORS,
 )
 from crypto_utils import verify_plain_token
+from network_utils import recv_json, send_json
 
 
 producer_chain: list[dict[str, Any]] = []
-
-
-def receive_json(connection: socket.socket) -> dict[str, Any]:
-    """Read one newline-delimited JSON message from a TCP connection."""
-    chunks: list[bytes] = []
-    while True:
-        chunk = connection.recv(4096)
-        if not chunk:
-            break
-        chunks.append(chunk)
-        if b"\n" in chunk:
-            break
-
-    raw_message = b"".join(chunks).split(b"\n", 1)[0]
-    if not raw_message:
-        raise ValueError("empty message")
-    return json.loads(raw_message.decode("utf-8"))
-
-
-def send_json(connection: socket.socket, message: dict[str, Any]) -> None:
-    """Send one newline-delimited JSON message."""
-    encoded = json.dumps(message, separators=(",", ":")).encode("utf-8") + b"\n"
-    connection.sendall(encoded)
 
 
 def create_block_from_log(log_message: dict[str, Any]) -> dict[str, Any]:
@@ -77,8 +54,8 @@ def propose_block_to_validator(
             timeout=SOCKET_TIMEOUT_SECONDS,
         ) as client_socket:
             send_json(client_socket, outbound_message)
-            response = receive_json(client_socket)
-    except (OSError, ValueError) as exc:
+            response = recv_json(client_socket)
+    except (OSError, ValueError, ConnectionError) as exc:
         print(
             f"[Producer] Failed to propose Block #{block['index']} "
             f"to Validator {validator_id}: {exc}"
@@ -120,8 +97,8 @@ def send_commit_to_validator(validator_id: str, block: dict[str, Any]) -> bool:
             timeout=SOCKET_TIMEOUT_SECONDS,
         ) as client_socket:
             send_json(client_socket, message)
-            response = receive_json(client_socket)
-    except (OSError, ValueError) as exc:
+            response = recv_json(client_socket)
+    except (OSError, ValueError, ConnectionError) as exc:
         print(
             f"[Producer] Failed to commit Block #{block['index']} "
             f"to Validator {validator_id}: {exc}"
@@ -171,7 +148,7 @@ def handle_log_connection(
 ) -> None:
     """Handle one LOG message from a log node."""
     try:
-        message = receive_json(connection)
+        message = recv_json(connection)
 
         if not verify_plain_token(message.get("token", "")):
             print(f"[Producer] Invalid token from {address[0]}:{address[1]}")
@@ -208,6 +185,9 @@ def handle_log_connection(
                 "current_hash": block["current_hash"],
             },
         )
+    except (ConnectionError, UnicodeError, ValueError) as exc:
+        print(f"[Network] Failed to receive JSON message: {exc}")
+        print("[Producer] Invalid message from client. Closing connection.")
     except Exception as exc:
         print(f"[Producer] Error while handling {address[0]}:{address[1]}: {exc}")
         try:

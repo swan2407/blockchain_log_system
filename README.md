@@ -1,147 +1,294 @@
 # Distributed Log Integrity Verification and Failure Recovery System
 
-This project implements a Python TCP socket based distributed log integrity
-verification system. Log messages are converted into SHA-256 hash-chained
-blocks, replicated to independent validator nodes, and checked for tampering or
-state divergence.
+## Project Overview
 
-This is not a full blockchain with mining, consensus, or cryptocurrency
-behavior. It is a SHA-256 hash-chain based distributed log integrity
-verification system.
+A log system that stores all records in one location is vulnerable to several
+failure modes:
 
-## Architecture Summary
+- an attacker or operator may modify or delete historical logs;
+- a storage failure may make logs unavailable;
+- a failed node may miss records produced while it is offline;
+- independent replicas may diverge without a clear verification mechanism.
 
-- `log_node.py` sends JSON `LOG` messages to the block producer.
-- `block_producer.py` receives logs, proposes hash-chained blocks, and commits
-  them after a 2-of-3 validator quorum.
-- `validator_node.py` runs as an independent TCP server for each validator.
-- `check_validators.py` verifies validator chain integrity and compares their
-  latest replicated state.
-- `reset_data.py` resets validator chain files.
-- `tamper.py` intentionally modifies one validator chain file for tamper
-  detection experiments.
-- `run_experiment.py` is a placeholder for later experiment automation.
-- `c_client/` is reserved for a future C-based external log sender.
+This project explores these problems in a small distributed environment. Log
+messages are converted into SHA-256 hash-chained blocks and replicated to three
+independent validators: Validator A, Validator B, and Validator C. Each
+validator stores its own chain file and can verify the complete history,
+identify tampering, compare replicated state, and recover committed blocks
+missed during downtime.
 
-Validator storage files:
+Reliability is improved through validator recovery sync, invalid peer
+exclusion, quorum-aware recovery, atomic JSON file replacement, idempotent
+storage, and a simplified 2-of-3 quorum commit protocol.
 
-- `data/validator_A_chain.json`
-- `data/validator_B_chain.json`
-- `data/validator_C_chain.json`
+## Project Scope and Character
 
-## Why Python Is Used
+This project is a prototype implementation project. It does not directly
+modify or improve a specific commercial logging product, and it does not
+propose a new distributed consensus algorithm.
 
-Python is used to quickly build and verify the distributed system behavior:
+> This project is a prototype that applies distributed systems concepts such
+> as hash chaining, validator replication, failure recovery, invalid peer
+> exclusion, and simplified quorum commit to verify log integrity and recovery
+> behavior.
 
-- TCP server and client control flow;
-- SHA-256 block creation and verification;
-- validator replication;
-- integrity checking and tamper detection;
-- later failure recovery and synchronization;
-- experiment automation and result collection.
+The project should be understood as an engineering study of distributed log
+reliability:
 
-## Why C Will Be Added Later
+- It is **not a full blockchain** and does not include mining, cryptocurrency,
+  or decentralized governance.
+- It is **not a full Raft or PBFT implementation**.
+- It is **not a new consensus algorithm**.
+- Its 2-of-3 protocol is a simplified commit mechanism for controlled
+  experiments, not a production-grade consensus protocol.
 
-C will be added as a lightweight field-side log generation node. This language
-separation is intentional: it shows that the system is based on a TCP/JSON
-protocol and can interoperate across runtime environments, not just
-Python-to-Python communication.
+## Architecture
 
-## Block Format
+```text
+log_node.py
+    |
+    | TCP / JSON LOG
+    v
+block_producer.py
+    |
+    | PROPOSE_BLOCK
+    v
+validator_node.py A / B / C
+    |
+    | ACK / NACK
+    v
+block_producer.py
+    |
+    | COMMIT_BLOCK if 2-of-3 quorum is reached
+    v
+validator_node.py A / B / C
+    |
+    v
+data/validator_A_chain.json
+data/validator_B_chain.json
+data/validator_C_chain.json
+    |
+    v
+check_validators.py
+```
 
-Each block is stored as JSON:
+Each validator runs as an independent TCP server and maintains an independent
+chain file. On startup, a validator can request missing committed blocks from
+its peers before serving new requests.
+
+### Default Ports
+
+| Component | Address |
+|---|---|
+| Block producer | `127.0.0.1:9000` |
+| Validator A | `127.0.0.1:9101` |
+| Validator B | `127.0.0.1:9102` |
+| Validator C | `127.0.0.1:9103` |
+
+## File Structure
+
+| Path | Responsibility |
+|---|---|
+| `config.py` | Defines ports, validator addresses, chain paths, token, timeouts, and shared constants. |
+| `crypto_utils.py` | Provides SHA-256 hashing and simple token verification helpers. |
+| `network_utils.py` | Sends and receives length-prefixed JSON messages over TCP. |
+| `blockchain.py` | Creates and verifies blocks, validates commit proofs, loads and atomically saves chains, and performs idempotent appends. |
+| `log_node.py` | Generates equipment-style log messages and sends `LOG` requests to the producer. |
+| `block_producer.py` | Creates candidate blocks, collects validator ACKs, and broadcasts committed blocks after quorum. |
+| `validator_node.py` | Runs Validator A, B, or C; verifies proposals, stores committed blocks, and performs recovery sync. |
+| `check_validators.py` | Verifies each chain and commit proof, then compares validator block counts and latest hashes. |
+| `tamper.py` | Intentionally modifies or deletes stored blocks for integrity experiments. |
+| `reset_data.py` | Resets all validator chain files for repeatable experiments. |
+| `run_experiment.py` | Placeholder for future experiment automation. |
+| `data/` | Stores the independent JSON chain files for Validators A, B, and C. |
+| `c_client/` | Reserved for a planned C-based external log sender. |
+
+## Length-prefixed TCP Protocol
+
+TCP is a byte stream, not a message-based protocol. A single `recv(4096)` call
+does not guarantee one complete JSON message: one message may be split across
+multiple reads, or multiple messages may arrive in one read.
+
+All Python components therefore use an explicit length-prefixed protocol:
+
+```text
+[4-byte length][JSON payload]
+```
+
+The first four bytes are an unsigned big-endian integer containing the UTF-8
+JSON payload length. `network_utils.py` reads the header and payload exactly,
+rejects messages larger than 10 MiB, and returns one decoded JSON object at a
+time.
+
+This framing also defines a clear interoperability contract for the future
+C-based log sender. A C client must encode the payload as UTF-8 JSON and send
+its byte length in network byte order before the payload.
+
+## Block Structure
+
+A committed block is stored as JSON:
 
 ```json
 {
-  "index": 0,
+  "index": 3,
   "timestamp": 1710000000.123,
   "log_data": {
     "node_id": "NODE-01",
-    "message": "STATUS=NORMAL ACTION=BOOT"
+    "message": "STATUS=NORMAL ACTION=HEARTBEAT"
   },
-  "previous_hash": "0000000000000000000000000000000000000000000000000000000000000000",
-  "current_hash": "...",
+  "previous_hash": "previous-block-sha256-hash",
+  "current_hash": "current-block-sha256-hash",
   "commit_proof": {
     "quorum": 2,
     "acks": [
-      {"validator_id": "A", "block_index": 0, "block_hash": "..."},
-      {"validator_id": "C", "block_index": 0, "block_hash": "..."}
+      {
+        "validator_id": "A",
+        "block_index": 3,
+        "block_hash": "current-block-sha256-hash"
+      },
+      {
+        "validator_id": "C",
+        "block_index": 3,
+        "block_hash": "current-block-sha256-hash"
+      }
     ]
   }
 }
 ```
 
-The block hash is calculated only from:
+`current_hash` is calculated from only:
 
 - `index`
 - `timestamp`
 - `log_data`
 - `previous_hash`
 
-`current_hash` is never included when calculating or verifying a block hash.
-`commit_proof` is also excluded from the block hash because it is added only
-after validators acknowledge the candidate block.
+`current_hash` itself is not included when recalculating the hash.
+`commit_proof` is also excluded because it is attached only after validators
+acknowledge the candidate block.
+
+## Core Features
+
+### SHA-256 Hash Chain
+
+Every block contains the previous block's hash. Modifying a historical block
+changes its recalculated hash and breaks the connection to later blocks.
+
+### Full Chain Verification
+
+The verifier checks every block in order:
+
+- required block fields;
+- sequential block index;
+- connection to the previous block hash;
+- recalculated SHA-256 hash;
+- commit proof status when validator state is checked.
+
+### Validator Replication
+
+Validators A, B, and C store independent chain files. This allows the project
+to compare replicas, detect divergence, and recover a validator that missed
+committed blocks.
+
+### Tamper Detection
+
+`tamper.py` intentionally changes stored data without repairing the full chain.
+The checker can detect modified log data, invalid hashes, broken links, deleted
+blocks, and differences between validator replicas.
+
+### Failure Recovery Sync
+
+When a validator starts, it requests blocks after its local latest index. Each
+received block is verified locally before it is appended.
+
+### Quorum-Aware Recovery Sync
+
+When multiple valid peers respond, the recovering validator compares block
+indexes and hashes. Conflicting responses cause sync to abort rather than
+silently selecting inconsistent data.
+
+### Invalid Peer Exclusion
+
+A validator with an invalid local chain refuses to serve recovery blocks and
+returns `LOCAL_CHAIN_INVALID`. A recovering validator ignores that peer and
+continues using available valid data subject to local verification.
+
+### 2-of-3 Quorum Commit
+
+The producer commits a candidate only after at least two validators acknowledge
+the same block index and hash. A proposal that receives only one ACK is
+aborted.
+
+### Commit Proof Validation
+
+Committed and recovered blocks must contain a valid `commit_proof`:
+
+- the declared quorum must be at least two;
+- at least two ACK entries must exist;
+- validator IDs must be unique;
+- each ACK index must match the block index;
+- each ACK hash must match the block's `current_hash`.
+
+### Atomic and Idempotent Storage
+
+Validator chains are written to a temporary file, flushed, synchronized with
+`fsync()`, and atomically replaced using `os.replace()`. Repeated delivery of
+the same committed block is treated as a successful skip, while conflicting,
+invalid, or out-of-order blocks are rejected before storage.
 
 ## 2-of-3 Quorum Commit Protocol
 
-This is not a full Raft or PBFT consensus algorithm. It is a simplified quorum
-commit protocol for this prototype.
+The earlier direct replication approach allowed a validator to save a block as
+soon as it received it:
 
-1. The producer creates a candidate block but does not add it to its chain.
-2. The producer sends `PROPOSE_BLOCK` to validators A, B, and C.
-3. Each validator verifies the index, previous hash, and recalculated block
-   hash, then returns an ACCEPT ACK or REJECT ACK. Proposals are not stored.
-4. The producer commits only after at least two validators ACK the same block
-   index and hash.
-5. The producer adds `commit_proof` containing the quorum ACK metadata and
-   sends `COMMIT_BLOCK` to all validators.
-6. Validators revalidate the block and commit proof before idempotently saving
-   the block.
+```text
+Producer -> BLOCK -> Validator saves immediately
+```
 
-A valid `commit_proof` has a declared quorum of at least two, at least two ACKs,
-unique validator IDs, and ACK block indexes and hashes matching the committed
-block. Recovery sync accepts only blocks with valid commit proof metadata, so a
-validator recovers committed blocks rather than arbitrary peer data.
+The current flow separates verification from storage:
 
-### Experiment 1: Normal quorum commit
+```text
+Producer  -> PROPOSE_BLOCK -> Validator verifies, but does not save
+Validator -> ACK / NACK    -> Producer
+Producer receives at least 2 matching ACKs
+Producer  -> COMMIT_BLOCK  -> Validator verifies commit_proof and saves
+```
 
-1. Reset data with `python reset_data.py`.
-2. Start Validator A, B, and C in separate terminals.
-3. Start `python block_producer.py`.
-4. Run `python log_node.py NODE-01 --count 5 --interval 0.5`.
-5. Run `python check_validators.py`.
+Protocol behavior:
 
-Expected: the producer prints that quorum was reached and each block was
-committed, validators save committed blocks, and the checker reports all
-validators synchronized with valid commit proofs.
+1. The producer creates a candidate block without advancing its committed
+   in-memory chain.
+2. The producer sends `PROPOSE_BLOCK` to Validators A, B, and C.
+3. Each validator verifies the next index, `previous_hash`, and recalculated
+   `current_hash`.
+4. Validators return an ACCEPT ACK or a REJECT ACK with a reason.
+5. Validators do **not** save blocks during `PROPOSE_BLOCK`.
+6. If at least two validators ACK the same candidate, the producer adds
+   `commit_proof` and sends `COMMIT_BLOCK`.
+7. Validators save only a locally valid block with a valid `commit_proof`.
+8. If only one validator ACKs, the producer aborts the commit.
+9. If one validator is down, the other two validators can still form quorum.
 
-### Experiment 2: One validator down but quorum still succeeds
+**This is a simplified quorum-based commit protocol, not a full Raft or PBFT
+consensus algorithm.** It does not implement leader election, terms, replicated
+state-machine guarantees, Byzantine signatures, or complete network partition
+handling.
 
-1. Reset data with `python reset_data.py`.
-2. Start only Validator A and Validator C.
-3. Start the producer and generate logs.
-4. Run the checker, then start Validator B to recover the committed blocks.
+## How to Run
 
-Expected: the producer cannot contact B, A and C ACK, the 2-of-3 quorum commits,
-and B later syncs blocks carrying valid commit proofs.
+Requirements:
 
-### Experiment 3: Quorum failure
+- Python 3.10 or later
+- Python standard library only
+- Run commands from the project root
 
-1. Reset data with `python reset_data.py`.
-2. Start only Validator A.
-3. Start the producer and generate logs.
-4. Run `python check_validators.py`.
-
-Expected: only one ACK is received, quorum is not reached, the producer aborts
-the commit, and no validator stores the candidate block.
-
-## Communication Flow
-
-Reset validator data first:
+Reset validator data before a repeatable experiment:
 
 ```bash
 python reset_data.py
 ```
+
+Start each component in a separate terminal.
 
 Terminal 1:
 
@@ -173,50 +320,56 @@ Terminal 5:
 python log_node.py NODE-01 --count 5 --interval 0.5
 ```
 
-Then verify:
+Verify chain integrity and synchronization:
 
 ```bash
 python check_validators.py
 ```
 
-Expected result:
-
-- validator A, B, and C should all have valid chains;
-- their block counts should match;
-- their latest hashes should match;
-- `check_validators.py` should print:
+Expected normal result:
 
 ```text
 Result: All validators are synchronized.
 ```
 
-## Tamper Detection Experiment
-
-After generating and verifying a normal replicated chain, intentionally tamper
-with one validator file:
+Run the focused protocol tests:
 
 ```bash
-python tamper.py B 3 log
+python test_network_utils.py
 ```
 
-Then verify again:
+## Experiments
+
+Use `python reset_data.py` before each experiment unless the procedure says
+otherwise.
+
+### Experiment 1: Normal Replication and Quorum Commit
+
+1. Start Validators A, B, and C.
+2. Start the producer.
+3. Generate logs:
+
+```bash
+python log_node.py NODE-01 --count 5 --interval 0.5
+```
+
+4. Check validator state:
 
 ```bash
 python check_validators.py
 ```
 
-Expected result:
+Expected behavior:
 
-- validator B should report an invalid chain or a different replicated state;
-- the detailed error should identify validator B and the affected block index
-  when available;
-- `check_validators.py` should print:
+- the producer reports that each block reached quorum;
+- all validators save committed blocks;
+- all chains and commit proofs are valid;
+- `check_validators.py` reports synchronized validators.
 
-```text
-Result: Validators are not synchronized.
-```
+### Experiment 2: Tamper Detection
 
-Supported tamper commands:
+First create at least five committed blocks, then stop the affected validator
+before editing its file. Run one tamper command per reset:
 
 ```bash
 python tamper.py B 3 log
@@ -225,288 +378,144 @@ python tamper.py B 3 current_hash
 python tamper.py B 3 delete
 ```
 
-Tamper modes:
-
-- `log` changes the selected block's `log_data.message` field, or replaces
-  `log_data` when it is not an object.
-- `previous_hash` replaces the selected block's `previous_hash` with an invalid
-  value.
-- `current_hash` replaces the selected block's `current_hash` with an invalid
-  value.
-- `delete` removes the selected block from the chain.
-
-`tamper.py` does not recalculate hashes. It simulates an attacker modifying
-stored data without repairing the complete hash chain.
-
-## Failure Recovery Experiment
-
-This experiment verifies that a validator can recover blocks it missed while it
-was offline.
-
-1. Reset data:
-
-```bash
-python reset_data.py
-```
-
-2. Start Validator A, B, and C in separate terminals:
-
-```bash
-python validator_node.py A
-python validator_node.py B
-python validator_node.py C
-```
-
-3. Start the producer in another terminal:
-
-```bash
-python block_producer.py
-```
-
-4. Generate initial logs:
-
-```bash
-python log_node.py NODE-01 --count 3 --interval 0.5
-```
-
-5. Stop Validator B manually.
-
-6. Generate more logs while B is down:
-
-```bash
-python log_node.py NODE-01 --count 3 --interval 0.5
-```
-
-7. Check validators:
+Then run:
 
 ```bash
 python check_validators.py
 ```
 
-Expected: Validator B should have fewer blocks and validators should not be
-synchronized.
+Expected errors depend on the selected tamper mode:
 
-8. Restart Validator B:
+| Tamper mode | Typical result |
+|---|---|
+| `log` | Hash mismatch because `log_data` changed. |
+| `previous_hash` | Previous-hash mismatch and possibly a hash mismatch. |
+| `current_hash` | Hash mismatch and a broken link to the next block. |
+| `delete` | Index mismatch, previous-hash mismatch, block-count mismatch, or latest-hash difference. |
 
-```bash
-python validator_node.py B
-```
+### Experiment 3: Validator Failure and Recovery
 
-Expected: Validator B should automatically request missing blocks from another
-validator and sync.
-
-9. Check validators again:
-
-```bash
-python check_validators.py
-```
-
-Expected:
-
-```text
-Result: All validators are synchronized.
-```
-
-## Quorum-based Recovery Sync and Conflict Detection
-
-Validator startup recovery now requests missing blocks from every available peer
-validator. When more than one safe peer responds, the recovering validator
-compares returned blocks by index and `current_hash` before appending anything.
-Every accepted block is still verified locally against the recovering
-validator's current chain tip.
-
-If a validator's own local chain is invalid, it refuses to serve sync blocks and
-returns `LOCAL_CHAIN_INVALID`. The recovering validator ignores that peer as an
-unsafe sync source.
-
-### Experiment 1: Normal quorum recovery
-
-1. Reset data:
-
-```bash
-python reset_data.py
-```
-
-2. Start Validator A, B, and C in separate terminals:
-
-```bash
-python validator_node.py A
-python validator_node.py B
-python validator_node.py C
-```
-
-3. Start the producer:
-
-```bash
-python block_producer.py
-```
-
-4. Generate 3 logs:
+1. Start Validators A, B, and C and the producer.
+2. Generate three logs:
 
 ```bash
 python log_node.py NODE-01 --count 3 --interval 0.5
 ```
 
-5. Stop Validator B manually.
-
-6. Generate 3 more logs while B is down:
+3. Stop Validator B.
+4. Generate three more logs:
 
 ```bash
 python log_node.py NODE-01 --count 3 --interval 0.5
 ```
 
-7. Check validators:
-
-```bash
-python check_validators.py
-```
-
-Expected: Validator B should have fewer blocks and validators should not be
-synchronized.
-
-8. Restart Validator B:
+5. Validators A and C should have six blocks while B still has three.
+6. Restart Validator B:
 
 ```bash
 python validator_node.py B
 ```
 
-Expected: Validator B requests missing blocks from Validator A and Validator C.
-A and C should respond with matching block hashes, and B should sync the missing
-blocks.
+7. Validator B requests missing committed blocks, verifies them, and syncs.
+8. Run `python check_validators.py`.
 
-9. Check validators again:
+Expected behavior: all three validators become synchronized again.
 
-```bash
-python check_validators.py
-```
+### Experiment 4: Invalid Peer Exclusion
 
-Expected:
-
-```text
-Result: All validators are synchronized.
-```
-
-### Experiment 2: Conflict detection during recovery
-
-1. Reset data:
-
-```bash
-python reset_data.py
-```
-
-2. Start Validator A, B, and C in separate terminals:
-
-```bash
-python validator_node.py A
-python validator_node.py B
-python validator_node.py C
-```
-
-3. Start the producer:
-
-```bash
-python block_producer.py
-```
-
-4. Generate 3 logs:
-
-```bash
-python log_node.py NODE-01 --count 3 --interval 0.5
-```
-
-5. Stop Validator B manually.
-
-6. Generate 3 more logs while B is down:
-
-```bash
-python log_node.py NODE-01 --count 3 --interval 0.5
-```
-
-7. Tamper Validator C block 4:
+1. Start all validators and the producer, then generate initial logs.
+2. Stop Validator B.
+3. Generate additional logs so B falls behind.
+4. Stop Validator C and tamper with its chain:
 
 ```bash
 python tamper.py C 4 log
 ```
 
-8. Restart Validator B:
+5. Restart Validator C, then restart Validator B.
+
+Expected behavior:
+
+- C detects its invalid local chain and reports `LOCAL_CHAIN_INVALID` when
+  asked to serve sync data;
+- B ignores C as an unsafe recovery source;
+- B can use a valid peer's committed blocks after local block and commit-proof
+  verification;
+- conflicting or invalid recovery data is not appended.
+
+### Experiment 5: Quorum Failure
+
+1. Reset data.
+2. Start only Validator A.
+3. Start the producer.
+4. Generate logs:
 
 ```bash
-python validator_node.py B
+python log_node.py NODE-01 --count 3 --interval 0.5
 ```
 
-Expected: Validator B requests missing blocks from A and C. Validator C should
-refuse to serve sync blocks because its local chain is invalid, and B should
-ignore C as an unsafe sync source. If multiple valid peers return different
-`current_hash` values for the same block index, B reports the conflicting peer
-hashes and aborts sync without appending the conflicting blocks.
+Expected behavior:
 
-## Current Ports
+- only one validator ACK is available;
+- the producer fails to reach the required 2-of-3 quorum;
+- the producer aborts each commit;
+- no candidate block is stored as committed.
 
-The current default ports are defined in `config.py`:
+## Current Development Status
 
-- block producer: `127.0.0.1:9000`
-- validator A: `127.0.0.1:9101`
-- validator B: `127.0.0.1:9102`
-- validator C: `127.0.0.1:9103`
+| Feature | Status |
+|---|---|
+| Length-prefixed Python TCP/JSON communication | Completed |
+| SHA-256 hash-chained blocks | Completed |
+| Independent Validator A/B/C storage | Completed |
+| Full chain verification | Completed |
+| Tamper detection experiments | Completed |
+| Validator failure recovery sync | Completed |
+| Invalid peer exclusion | Completed |
+| Quorum-aware recovery sync | Completed |
+| Simplified 2-of-3 quorum commit | Completed |
+| Commit proof validation | Completed |
+| Atomic file replacement and idempotent append | Completed |
+| Automated experiment runner | Planned |
+| C-based log sender | Planned |
 
-## Atomic File Write and Idempotent Storage
+## Limitations
 
-Validator chain files are not overwritten directly. `save_chain()` writes the
-complete JSON chain to a sibling `.tmp` file, flushes Python's file buffer,
-calls `fsync()` to request durable storage, and then uses `os.replace()` to
-atomically replace the original chain file. If writing fails before replacement,
-the previous chain file remains unchanged and the temporary file is removed
-when possible.
+- This is not a full blockchain.
+- This is not a full Raft or PBFT implementation.
+- There is no leader election, term management, or automatic producer failover.
+- The producer remains a single leader-like component and a potential single
+  point of failure.
+- `commit_proof` ACK entries are not cryptographically signed.
+- Token authentication is intentionally simple and is not suitable for
+  production security.
+- TCP messages are limited to 10 MiB, but the protocol does not yet negotiate
+  versions or capabilities.
+- JSON file storage is suitable for prototype experiments, not high-throughput
+  production workloads.
+- Recovery behavior is simplified and does not fully model network partitions,
+  concurrent leaders, or Byzantine validators.
+- A real deployment would require stronger durable storage, authentication,
+  authorization, observability, and operational recovery procedures.
 
-Missing and empty chain files are treated as empty chains. Existing files with
-invalid JSON are reported as storage errors instead of being silently treated
-as empty, preventing a validator from overwriting corrupted committed state.
+## Future Improvements
 
-Committed and synced blocks use idempotent append handling. Receiving the same
-block index and hash again is a successful skip, so repeated `COMMIT_BLOCK`
-messages do not duplicate blocks. A different hash at an existing index is a
-conflict, a future index is a gap, and an invalid next block is rejected before
-the local chain is saved.
+- Further harden atomic file writes with directory synchronization, backups,
+  and tested crash-recovery procedures.
+- Add protocol versioning and structured error codes.
+- Replace the plain shared token with HMAC-based authentication and replay
+  protection.
+- Implement the planned C-based log sender in `c_client/`.
+- Automate normal, failure, tamper, recovery, and quorum experiments through
+  `run_experiment.py`.
+- Add unit and integration tests for protocol messages and crash scenarios.
+- Create a Raft-inspired design document or simulation to compare this
+  simplified protocol with a complete consensus design without claiming that
+  the current implementation is Raft.
 
-Manual storage verification:
+## Portfolio Summary
 
-1. Run `python reset_data.py`, start all validators and the producer, then
-   generate logs normally.
-2. Retry the same `COMMIT_BLOCK`; the validator should report that the block
-   already exists and the chain length should remain unchanged.
-3. Run `python check_validators.py`; all chains and commit proofs should remain
-   valid.
-
-## Compile Checks
-
-Compile the communication scripts:
-
-```bash
-python -m py_compile validator_node.py block_producer.py log_node.py check_validators.py tamper.py
-```
-
-Compile the core modules:
-
-```bash
-python -m py_compile config.py crypto_utils.py blockchain.py reset_data.py
-```
-
-## Current Project Structure
-
-```text
-blockchain_log_system/
-|-- config.py
-|-- crypto_utils.py
-|-- blockchain.py
-|-- log_node.py
-|-- block_producer.py
-|-- validator_node.py
-|-- check_validators.py
-|-- tamper.py
-|-- run_experiment.py
-|-- reset_data.py
-|-- README.md
-|-- data/
-`-- c_client/
-    `-- README.md
-```
+This project demonstrates a distributed log integrity verification prototype
+that uses SHA-256 hash chaining, validator replication, tamper detection,
+failure recovery, invalid peer exclusion, and simplified 2-of-3 quorum commit
+to study reliability issues in distributed logging systems.

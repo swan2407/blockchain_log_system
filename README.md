@@ -12,8 +12,8 @@ verification system.
 ## Architecture Summary
 
 - `log_node.py` sends JSON `LOG` messages to the block producer.
-- `block_producer.py` receives logs, creates hash-chained blocks, and sends each
-  block to validators A, B, and C.
+- `block_producer.py` receives logs, proposes hash-chained blocks, and commits
+  them after a 2-of-3 validator quorum.
 - `validator_node.py` runs as an independent TCP server for each validator.
 - `check_validators.py` verifies validator chain integrity and compares their
   latest replicated state.
@@ -60,7 +60,14 @@ Each block is stored as JSON:
     "message": "STATUS=NORMAL ACTION=BOOT"
   },
   "previous_hash": "0000000000000000000000000000000000000000000000000000000000000000",
-  "current_hash": "..."
+  "current_hash": "...",
+  "commit_proof": {
+    "quorum": 2,
+    "acks": [
+      {"validator_id": "A", "block_index": 0, "block_hash": "..."},
+      {"validator_id": "C", "block_index": 0, "block_hash": "..."}
+    ]
+  }
 }
 ```
 
@@ -72,6 +79,61 @@ The block hash is calculated only from:
 - `previous_hash`
 
 `current_hash` is never included when calculating or verifying a block hash.
+`commit_proof` is also excluded from the block hash because it is added only
+after validators acknowledge the candidate block.
+
+## 2-of-3 Quorum Commit Protocol
+
+This is not a full Raft or PBFT consensus algorithm. It is a simplified quorum
+commit protocol for this prototype.
+
+1. The producer creates a candidate block but does not add it to its chain.
+2. The producer sends `PROPOSE_BLOCK` to validators A, B, and C.
+3. Each validator verifies the index, previous hash, and recalculated block
+   hash, then returns an ACCEPT ACK or REJECT ACK. Proposals are not stored.
+4. The producer commits only after at least two validators ACK the same block
+   index and hash.
+5. The producer adds `commit_proof` containing the quorum ACK metadata and
+   sends `COMMIT_BLOCK` to all validators.
+6. Validators revalidate the block and commit proof before idempotently saving
+   the block.
+
+A valid `commit_proof` has a declared quorum of at least two, at least two ACKs,
+unique validator IDs, and ACK block indexes and hashes matching the committed
+block. Recovery sync accepts only blocks with valid commit proof metadata, so a
+validator recovers committed blocks rather than arbitrary peer data.
+
+### Experiment 1: Normal quorum commit
+
+1. Reset data with `python reset_data.py`.
+2. Start Validator A, B, and C in separate terminals.
+3. Start `python block_producer.py`.
+4. Run `python log_node.py NODE-01 --count 5 --interval 0.5`.
+5. Run `python check_validators.py`.
+
+Expected: the producer prints that quorum was reached and each block was
+committed, validators save committed blocks, and the checker reports all
+validators synchronized with valid commit proofs.
+
+### Experiment 2: One validator down but quorum still succeeds
+
+1. Reset data with `python reset_data.py`.
+2. Start only Validator A and Validator C.
+3. Start the producer and generate logs.
+4. Run the checker, then start Validator B to recover the committed blocks.
+
+Expected: the producer cannot contact B, A and C ACK, the 2-of-3 quorum commits,
+and B later syncs blocks carrying valid commit proofs.
+
+### Experiment 3: Quorum failure
+
+1. Reset data with `python reset_data.py`.
+2. Start only Validator A.
+3. Start the producer and generate logs.
+4. Run `python check_validators.py`.
+
+Expected: only one ACK is received, quorum is not reached, the producer aborts
+the commit, and no validator stores the candidate block.
 
 ## Communication Flow
 

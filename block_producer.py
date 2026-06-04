@@ -6,7 +6,7 @@ import json
 import socket
 from typing import Any
 
-from blockchain import create_block, get_latest_hash
+from blockchain import add_commit_proof, create_block, get_latest_hash
 from config import (
     BLOCK_PRODUCER_HOST,
     BLOCK_PRODUCER_PORT,
@@ -46,7 +46,7 @@ def send_json(connection: socket.socket, message: dict[str, Any]) -> None:
 
 
 def create_block_from_log(log_message: dict[str, Any]) -> dict[str, Any]:
-    """Create and remember the next block from a valid LOG message."""
+    """Create a candidate block from a valid LOG message."""
     log_data = {
         "node_id": log_message["node_id"],
         "message": log_message["message"],
@@ -56,15 +56,17 @@ def create_block_from_log(log_message: dict[str, Any]) -> dict[str, Any]:
         log_data=log_data,
         previous_hash=get_latest_hash(producer_chain),
     )
-    producer_chain.append(block)
     return block
 
 
-def send_block_to_validator(validator_id: str, block: dict[str, Any]) -> bool:
-    """Send a block to one validator without affecting other validators."""
+def propose_block_to_validator(
+    validator_id: str,
+    block: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Propose a candidate block and return a validated ACCEPT ACK."""
     validator = VALIDATORS[validator_id]
     outbound_message = {
-        "type": "BLOCK",
+        "type": "PROPOSE_BLOCK",
         "block": block,
         "token": SECRET_TOKEN,
     }
@@ -76,29 +78,91 @@ def send_block_to_validator(validator_id: str, block: dict[str, Any]) -> bool:
         ) as client_socket:
             send_json(client_socket, outbound_message)
             response = receive_json(client_socket)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         print(
-            f"[Producer] Failed to send Block #{block['index']} "
+            f"[Producer] Failed to propose Block #{block['index']} "
+            f"to Validator {validator_id}: {exc}"
+        )
+        return None
+
+    if not isinstance(response, dict):
+        print(
+            f"[Producer] Validator {validator_id} returned an invalid proposal response"
+        )
+        return None
+
+    valid_ack = (
+        response.get("type") == "ACK"
+        and response.get("validator_id") == validator_id
+        and response.get("block_index") == block["index"]
+        and response.get("block_hash") == block["current_hash"]
+        and response.get("status") == "ACCEPT"
+    )
+    if valid_ack:
+        print(f"[Producer] Validator {validator_id} ACKed Block #{block['index']}")
+        return response
+
+    reason = response.get("reason", "invalid or rejected ACK")
+    print(
+        f"[Producer] Validator {validator_id} rejected Block #{block['index']}: "
+        f"{reason}"
+    )
+    return None
+
+
+def send_commit_to_validator(validator_id: str, block: dict[str, Any]) -> bool:
+    """Send a quorum-committed block to one validator."""
+    validator = VALIDATORS[validator_id]
+    message = {"type": "COMMIT_BLOCK", "block": block, "token": SECRET_TOKEN}
+    try:
+        with socket.create_connection(
+            (validator["host"], validator["port"]),
+            timeout=SOCKET_TIMEOUT_SECONDS,
+        ) as client_socket:
+            send_json(client_socket, message)
+            response = receive_json(client_socket)
+    except (OSError, ValueError) as exc:
+        print(
+            f"[Producer] Failed to commit Block #{block['index']} "
             f"to Validator {validator_id}: {exc}"
         )
         return False
 
-    if response.get("status") == "OK":
-        print(f"[Producer] Sent Block #{block['index']} to Validator {validator_id}")
-        return True
+    if not isinstance(response, dict):
+        print(f"[Producer] Validator {validator_id} returned an invalid commit response")
+        return False
 
-    reason = response.get("reason", "validator rejected block")
+    if response.get("status") == "OK":
+        return True
     print(
-        f"[Producer] Failed to send Block #{block['index']} "
-        f"to Validator {validator_id}: {reason}"
+        f"[Producer] Validator {validator_id} failed to save Block #{block['index']}: "
+        f"{response.get('reason', 'unknown error')}"
     )
     return False
 
 
-def broadcast_block(block: dict[str, Any]) -> None:
-    """Broadcast a block to validators A, B, and C."""
+def commit_candidate(block: dict[str, Any]) -> bool:
+    """Commit a candidate after collecting a 2-of-3 validator quorum."""
+    acks = []
     for validator_id in VALIDATOR_IDS:
-        send_block_to_validator(validator_id, block)
+        ack = propose_block_to_validator(validator_id, block)
+        if ack is not None:
+            acks.append(ack)
+
+    if len(acks) < 2:
+        print(
+            f"[Producer] Block #{block['index']} failed to reach quorum. "
+            "Commit aborted."
+        )
+        return False
+
+    print(f"[Producer] Block #{block['index']} reached quorum with {len(acks)} ACKs")
+    add_commit_proof(block, acks, quorum_size=2)
+    producer_chain.append(block)
+    for validator_id in VALIDATOR_IDS:
+        send_commit_to_validator(validator_id, block)
+    print(f"[Producer] Committed Block #{block['index']}")
+    return True
 
 
 def handle_log_connection(
@@ -125,7 +189,16 @@ def handle_log_connection(
         print(f"[Producer] Received log from {message['node_id']}")
         block = create_block_from_log(message)
         print(f"[Producer] Created Block #{block['index']}")
-        broadcast_block(block)
+        if not commit_candidate(block):
+            send_json(
+                connection,
+                {
+                    "status": "ERROR",
+                    "reason": "quorum not reached; commit aborted",
+                    "block_index": block["index"],
+                },
+            )
+            return
 
         send_json(
             connection,

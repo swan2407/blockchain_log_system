@@ -43,6 +43,80 @@ def create_block(index: int, log_data: Any, previous_hash: str) -> dict[str, Any
     return block
 
 
+def add_commit_proof(
+    block: dict[str, Any],
+    acks: list[dict[str, Any]],
+    quorum_size: int = 2,
+) -> dict[str, Any]:
+    """Attach normalized validator acknowledgements to a committed block."""
+    block["commit_proof"] = {
+        "quorum": quorum_size,
+        "acks": [
+            {
+                "validator_id": ack.get("validator_id"),
+                "block_index": ack.get("block_index"),
+                "block_hash": ack.get("block_hash"),
+            }
+            for ack in acks
+        ],
+    }
+    return block
+
+
+def validate_commit_proof(
+    block: dict[str, Any],
+    quorum_size: int = 2,
+) -> tuple[bool, list[str]]:
+    """Verify that a block contains a valid unique-validator quorum proof."""
+    errors: list[str] = []
+    proof = block.get("commit_proof") if isinstance(block, dict) else None
+    if not isinstance(proof, dict):
+        return False, ["commit_proof is missing or invalid"]
+
+    proof_quorum = proof.get("quorum")
+    if not isinstance(proof_quorum, int) or proof_quorum < quorum_size:
+        errors.append(f"commit_proof.quorum must be at least {quorum_size}")
+
+    acks = proof.get("acks")
+    if not isinstance(acks, list):
+        return False, errors + ["commit_proof.acks must be a list"]
+    if len(acks) < quorum_size:
+        errors.append(f"commit_proof must contain at least {quorum_size} ACKs")
+    if isinstance(proof_quorum, int) and len(acks) < proof_quorum:
+        errors.append("commit_proof contains fewer ACKs than its declared quorum")
+
+    validator_ids: set[str] = set()
+    for position, ack in enumerate(acks):
+        if not isinstance(ack, dict):
+            errors.append(f"commit_proof ACK at position {position} is invalid")
+            continue
+
+        validator_id = ack.get("validator_id")
+        if not isinstance(validator_id, str) or not validator_id:
+            errors.append(f"commit_proof ACK at position {position} has invalid validator_id")
+        elif validator_id in validator_ids:
+            errors.append(f"commit_proof contains duplicate validator_id {validator_id}")
+        else:
+            validator_ids.add(validator_id)
+
+        if ack.get("block_index") != block.get("index"):
+            errors.append(
+                f"commit_proof ACK from {validator_id or '?'} has block_index mismatch"
+            )
+        if ack.get("block_hash") != block.get("current_hash"):
+            errors.append(
+                f"commit_proof ACK from {validator_id or '?'} has block_hash mismatch"
+            )
+
+    return len(errors) == 0, errors
+
+
+def has_valid_commit_proof(block: dict[str, Any], quorum_size: int = 2) -> bool:
+    """Return whether a block has a valid quorum commit proof."""
+    is_valid, _errors = validate_commit_proof(block, quorum_size)
+    return is_valid
+
+
 def load_chain(chain_file: str | Path) -> list[dict[str, Any]]:
     """Load a validator chain from disk. Missing files are treated as empty."""
     ensure_data_dir()

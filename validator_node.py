@@ -9,11 +9,13 @@ from typing import Any
 
 from blockchain import (
     append_block_idempotent,
-    append_blocks_idempotent,
     get_blocks_after_index,
     get_latest_index,
+    has_valid_commit_proof,
     load_chain,
     save_chain,
+    validate_commit_proof,
+    validate_next_block,
     verify_chain_detailed,
 )
 from config import (
@@ -51,46 +53,82 @@ def send_json(connection: socket.socket, message: dict[str, Any]) -> None:
     connection.sendall(encoded)
 
 
-def append_valid_block(
+def ack_message(
     validator_id: str,
     block: dict[str, Any],
-) -> tuple[bool, str]:
-    """Verify an incoming block against the local chain, then append it."""
-    chain_file = VALIDATOR_CHAIN_FILES[validator_id]
-    chain = load_chain(chain_file)
+    status: str,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    """Build an ACK/NACK response for one proposed block."""
+    response = {
+        "type": "ACK",
+        "validator_id": validator_id,
+        "block_index": block.get("index"),
+        "block_hash": block.get("current_hash"),
+        "status": status,
+    }
+    if reason:
+        response["reason"] = reason
+    return response
 
-    accepted, results = append_blocks_idempotent(chain, [block])
-    action, reason = results[-1]
-    if accepted:
-        if action == "appended":
-            save_chain(chain_file, chain)
-        return True, reason
-    return False, reason
 
-
-def handle_block_message(
+def handle_propose_block(
     validator_id: str,
     connection: socket.socket,
     message: dict[str, Any],
 ) -> None:
-    """Verify and append one BLOCK message from the block producer."""
+    """Verify a proposed block without storing it."""
     prefix = f"[Validator {validator_id}]"
-
     if not isinstance(message.get("block"), dict):
-        print(f"{prefix} Invalid message rejected")
-        send_json(connection, {"status": "ERROR", "reason": "invalid BLOCK"})
+        send_json(
+            connection,
+            ack_message(validator_id, {}, "REJECT", "invalid proposed block"),
+        )
         return
 
     block = message["block"]
     block_index = block.get("index", "?")
-    print(f"{prefix} Received Block #{block_index}")
+    chain = load_chain(VALIDATOR_CHAIN_FILES[validator_id])
+    is_valid, errors = validate_next_block(chain, block)
+    if is_valid:
+        print(f"{prefix} ACK Block #{block_index}")
+        send_json(connection, ack_message(validator_id, block, "ACCEPT"))
+        return
 
-    accepted, reason = append_valid_block(validator_id, block)
+    reason = "; ".join(errors)
+    print(f"{prefix} NACK Block #{block_index}: {reason}")
+    send_json(connection, ack_message(validator_id, block, "REJECT", reason))
+
+
+def handle_commit_block(
+    validator_id: str,
+    connection: socket.socket,
+    message: dict[str, Any],
+) -> None:
+    """Validate and idempotently store a quorum-committed block."""
+    prefix = f"[Validator {validator_id}]"
+    block = message.get("block")
+    if not isinstance(block, dict):
+        send_json(connection, {"status": "ERROR", "reason": "invalid committed block"})
+        return
+
+    proof_is_valid, proof_errors = validate_commit_proof(block)
+    if not proof_is_valid:
+        reason = "; ".join(proof_errors)
+        print(f"{prefix} Invalid commit proof rejected: {reason}")
+        send_json(connection, {"status": "ERROR", "reason": reason})
+        return
+
+    chain_file = VALIDATOR_CHAIN_FILES[validator_id]
+    chain = load_chain(chain_file)
+    accepted, action, reason = append_block_idempotent(chain, block)
     if accepted:
-        print(f"{prefix} Block #{block_index} accepted and saved")
+        if action == "appended":
+            save_chain(chain_file, chain)
+            print(f"{prefix} Committed Block #{block['index']} saved")
         send_json(connection, {"status": "OK", "reason": reason})
     else:
-        print(f"{prefix} Invalid block rejected: {reason}")
+        print(f"{prefix} Invalid committed block rejected: {reason}")
         send_json(connection, {"status": "ERROR", "reason": reason})
 
 
@@ -110,7 +148,8 @@ def handle_sync_request(
 
     chain = load_chain(VALIDATOR_CHAIN_FILES[validator_id])
     chain_is_valid, _chain_errors = verify_chain_detailed(chain)
-    if not chain_is_valid:
+    proofs_are_valid = all(has_valid_commit_proof(block) for block in chain)
+    if not chain_is_valid or not proofs_are_valid:
         print(
             f"{prefix} Refusing sync request from Validator {requester_id}: "
             "local chain is invalid"
@@ -159,8 +198,15 @@ def handle_connection(
             return
 
         message_type = message.get("type")
-        if message_type == "BLOCK":
-            handle_block_message(validator_id, connection, message)
+        if message_type == "PROPOSE_BLOCK":
+            handle_propose_block(validator_id, connection, message)
+        elif message_type == "COMMIT_BLOCK":
+            handle_commit_block(validator_id, connection, message)
+        elif message_type == "BLOCK":
+            send_json(
+                connection,
+                {"status": "ERROR", "reason": "legacy BLOCK rejected; commit proof required"},
+            )
         elif message_type == "SYNC_REQUEST":
             handle_sync_request(validator_id, connection, message)
         else:
@@ -341,6 +387,14 @@ def append_synced_blocks(
 
     for block in blocks:
         block_index = block.get("index") if isinstance(block, dict) else "?"
+        proof_is_valid, proof_errors = validate_commit_proof(block)
+        if not proof_is_valid:
+            print(
+                f"{prefix} Skipping Block #{block_index}: invalid commit_proof: "
+                f"{'; '.join(proof_errors)}"
+            )
+            print(f"{prefix} Sync aborted during commit proof verification")
+            return False
         accepted, action, message = append_block_idempotent(working_chain, block)
         actions.append((action, message, block_index))
         if not accepted:

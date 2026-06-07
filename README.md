@@ -101,7 +101,7 @@ its peers before serving new requests.
 | `reset_data.py` | Resets all validator chain files for repeatable experiments. |
 | `run_experiment.py` | Placeholder for future experiment automation. |
 | `data/` | Stores the independent JSON chain files for Validators A, B, and C. |
-| `c_client/` | Reserved for a planned C-based external log sender. |
+| `c_client/` | Contains the OpenSSL-based C external equipment log sender and its documentation. |
 
 ## Length-prefixed TCP Protocol
 
@@ -120,9 +120,9 @@ JSON payload length. `network_utils.py` reads the header and payload exactly,
 rejects messages larger than 10 MiB, and returns one decoded JSON object at a
 time.
 
-This framing also defines a clear interoperability contract for the future
-C-based log sender. A C client must encode the payload as UTF-8 JSON and send
-its byte length in network byte order before the payload.
+This framing defines a clear interoperability contract for the C-based log
+sender. The C client encodes the payload as UTF-8 JSON and sends its byte
+length in network byte order before the payload.
 
 ## HMAC-SHA256 Message Authentication
 
@@ -371,6 +371,33 @@ Run the focused HMAC authentication tests:
 python test_crypto_utils.py
 ```
 
+## C-based External Log Sender
+
+Python is used for distributed control, validator replication, quorum commit,
+and recovery. The client in `c_client/log_sender.c` uses C to simulate an
+embedded or equipment-side log generation node. This demonstrates
+protocol-based interoperability between different runtime environments.
+
+The client uses the same length-prefixed TCP framing and HMAC-SHA256
+authentication as the Python nodes. Build it with OpenSSL:
+
+```bash
+# Linux/macOS
+gcc c_client/log_sender.c -o c_client/log_sender -lssl -lcrypto
+
+# Windows with MSYS2/MinGW
+gcc c_client/log_sender.c -o c_client/log_sender.exe -lssl -lcrypto -lws2_32
+```
+
+After starting all validators and the producer, send three equipment logs:
+
+```bash
+./c_client/log_sender --count 3 --interval 0.5
+python check_validators.py
+```
+
+See `c_client/README.md` for all options and platform details.
+
 ## Experiments
 
 Use `python reset_data.py` before each experiment unless the procedure says
@@ -511,7 +538,7 @@ Expected behavior:
 | Commit proof validation | Completed |
 | Atomic file replacement and idempotent append | Completed |
 | Automated experiment runner | Planned |
-| C-based log sender | Planned |
+| C-based log sender | Completed |
 
 ## Limitations
 
@@ -542,7 +569,6 @@ Expected behavior:
   and tested crash-recovery procedures.
 - Add protocol versioning and structured error codes.
 - Add per-node keys, nonce-based replay protection, key rotation, and TLS.
-- Implement the planned C-based log sender in `c_client/`.
 - Automate normal, failure, tamper, recovery, and quorum experiments through
   `run_experiment.py`.
 - Add unit and integration tests for protocol messages and crash scenarios.

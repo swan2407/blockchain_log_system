@@ -1,0 +1,7 @@
+timestamp,experiment_type,count,total_time_sec,avg_time_ms,sign_time_sec,verify_time_sec,avg_sign_ms,avg_verify_ms,success,synchronized,validator,block_index,tamper_type,detected,chain_valid,before_synchronized,after_synchronized,missing_blocks,recovery_success,node_id,found_log_count,notes
+2026-06-07T04:51:15+00:00,normal,10,0.439784,43.978,,,,,True,True,,,,,,,,,,,,committed=10/10
+2026-06-07T04:51:36+00:00,normal,100,10.131321,101.313,,,,,True,True,,,,,,,,,,,,committed=100/100
+2026-06-07T04:53:13+00:00,normal,1000,83.066246,83.066,,,,,False,False,,,,,,,,,,,,committed=631/1000; log 632: quorum not reached; commit aborted; log 633: quorum not reached; commit aborted; log 634: quorum not reached; commit aborted; log 635: quorum not reached; commit aborted; log 636: quorum not reached; commit aborted
+2026-06-07T04:59:12+00:00,hmac,1000,,,0.006810,0.006368,0.007,0.006,True,,,,,,,,,,,,,verified=1000/1000
+2026-06-07T04:59:30+00:00,hmac,1000,,,0.007406,0.006316,0.007,0.006,True,,,,,,,,,,,,,verified=1000/1000
+2026-06-07T04:59:48+00:00,hmac,10000,,,0.065020,0.063851,0.007,0.006,True,,,,,,,,,,,,,verified=10000/10000

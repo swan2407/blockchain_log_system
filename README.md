@@ -99,7 +99,8 @@ its peers before serving new requests.
 | `check_validators.py` | Verifies each chain and commit proof, then compares validator block counts and latest hashes. |
 | `tamper.py` | Intentionally modifies or deletes stored blocks for integrity experiments. |
 | `reset_data.py` | Resets all validator chain files for repeatable experiments. |
-| `run_experiment.py` | Placeholder for future experiment automation. |
+| `run_experiment.py` | Runs quantitative normal, HMAC, tamper, recovery, and C-client experiments and appends CSV results. |
+| `experiments/` | Stores experiment documentation and generated CSV result files. |
 | `data/` | Stores the independent JSON chain files for Validators A, B, and C. |
 | `c_client/` | Contains the OpenSSL-based C external equipment log sender and its documentation. |
 
@@ -398,6 +399,65 @@ python check_validators.py
 
 See `c_client/README.md` for all options and platform details.
 
+## Experiment Automation
+
+`run_experiment.py` provides repeatable quantitative checks for normal log
+commit latency, HMAC overhead, tamper detection, recovery status, and C-client
+integration. Results are appended by default to:
+
+```text
+experiments/experiment_results.csv
+```
+
+The CSV uses one stable superset schema with a UTC `timestamp`,
+`experiment_type`, the metrics relevant to each mode, success flags, and
+notes. Fields that do not apply to a result are left empty. Use `--output` on
+any subcommand to select another CSV file.
+
+For a normal end-to-end experiment, start Validators A, B, and C and the
+producer first, then run:
+
+```bash
+python run_experiment.py normal --count 10
+python run_experiment.py normal --count 100
+python run_experiment.py normal --count 1000
+```
+
+Measure local HMAC signing and verification overhead without running network
+services:
+
+```bash
+python run_experiment.py hmac --count 1000
+```
+
+Apply a documented tamper operation and record whether chain verification or
+replica comparison detects it:
+
+```bash
+python run_experiment.py tamper --validator B --block-index 3 --tamper-type log
+```
+
+The `tamper` mode intentionally modifies validator data. Stop the selected
+validator first and reset or recover its data after the experiment.
+
+Record recovery state before and after a manually managed recovery window:
+
+```bash
+python run_experiment.py recovery-check
+python run_experiment.py recovery-check --wait 10
+```
+
+Process management remains manual: stop or restart the recovering validator
+externally. With `--wait`, the runner records current state, waits, and then
+checks synchronization again.
+
+After sending logs with the C client, verify that all synchronized validators
+contain the same committed entries for its node ID:
+
+```bash
+python run_experiment.py c-client-check --node-id C-EQUIPMENT-01
+```
+
 ## Experiments
 
 Use `python reset_data.py` before each experiment unless the procedure says
@@ -537,7 +597,7 @@ Expected behavior:
 | Simplified 2-of-3 quorum commit | Completed |
 | Commit proof validation | Completed |
 | Atomic file replacement and idempotent append | Completed |
-| Automated experiment runner | Planned |
+| Automated experiment runner | Completed |
 | C-based log sender | Completed |
 
 ## Limitations
@@ -569,8 +629,8 @@ Expected behavior:
   and tested crash-recovery procedures.
 - Add protocol versioning and structured error codes.
 - Add per-node keys, nonce-based replay protection, key rotation, and TLS.
-- Automate normal, failure, tamper, recovery, and quorum experiments through
-  `run_experiment.py`.
+- Extend experiment automation with safe subprocess lifecycle management and
+  repeated statistical trial summaries.
 - Add unit and integration tests for protocol messages and crash scenarios.
 - Create a Raft-inspired design document or simulation to compare this
   simplified protocol with a complete consensus design without claiming that
